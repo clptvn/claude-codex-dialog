@@ -1,0 +1,13 @@
+{
+  "name": "claude-codex-dialog",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "MCP server enabling back-and-forth discussions between Claude Code and Codex CLI",
+  "scripts": {
+    "start": "node src/dialog-server.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "zod": "^3.24.0"
+  }
+}
