@@ -12,6 +12,7 @@
 import fs from "fs";
 import path from "path";
 import { spawn } from "child_process";
+import { readConversation, appendMessage, sleep } from "./shared.mjs";
 
 const sessionDir = process.argv[2];
 const projectPath = process.argv[3] || process.cwd();
@@ -21,7 +22,6 @@ if (!sessionDir) {
   process.exit(1);
 }
 
-const CONVERSATION_PATH = path.join(sessionDir, "conversation.jsonl");
 const PROBLEM_PATH = path.join(sessionDir, "problem.md");
 const END_SIGNAL_PATH = path.join(sessionDir, "end_signal");
 const PROCESSING_PATH = path.join(sessionDir, "codex_processing");
@@ -39,28 +39,6 @@ const MAX_CONVERSATION_MESSAGES = 30; // truncate older messages in prompt
 function log(msg) {
   const ts = new Date().toISOString();
   fs.appendFileSync(LOG_PATH, `[${ts}] ${msg}\n`);
-}
-
-function readConversation() {
-  if (!fs.existsSync(CONVERSATION_PATH)) return [];
-  const lines = fs
-    .readFileSync(CONVERSATION_PATH, "utf-8")
-    .trim()
-    .split("\n")
-    .filter(Boolean);
-  return lines.map((l) => JSON.parse(l));
-}
-
-function appendMessage(from, content) {
-  const messages = readConversation();
-  const id = messages.length + 1;
-  const msg = { id, from, content, timestamp: new Date().toISOString() };
-  fs.appendFileSync(CONVERSATION_PATH, JSON.stringify(msg) + "\n");
-  return msg;
-}
-
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
 }
 
 // ── Codex prompt builder ─────────────────────────────────────────────────────
@@ -227,7 +205,7 @@ async function main() {
     }
 
     // Read current conversation
-    const messages = readConversation();
+    const messages = readConversation(sessionDir);
 
     // Find new messages from Claude that we haven't processed
     const newClaudeMessages = messages.filter(
@@ -255,7 +233,7 @@ async function main() {
         const response = await runCodex(prompt);
 
         if (response) {
-          appendMessage("codex", response);
+          appendMessage(sessionDir, "codex", response);
           codexTurns++;
           consecutiveErrors = 0;
           log(
@@ -272,6 +250,7 @@ async function main() {
         if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
           log("Too many consecutive errors, shutting down");
           appendMessage(
+            sessionDir,
             "codex",
             `[SYSTEM] Dialog runner encountered ${MAX_CONSECUTIVE_ERRORS} consecutive errors and is shutting down. Last error: ${err.message}`
           );
@@ -289,6 +268,7 @@ async function main() {
       if (idleMs > MAX_IDLE_MS) {
         log(`Idle timeout reached (${(idleMs / 1000).toFixed(0)}s). Shutting down.`);
         appendMessage(
+          sessionDir,
           "codex",
           "[SYSTEM] Dialog runner shut down due to inactivity. Start a new dialog to continue the discussion."
         );
@@ -302,6 +282,7 @@ async function main() {
   if (codexTurns >= MAX_TURNS) {
     log(`Max turns (${MAX_TURNS}) reached`);
     appendMessage(
+      sessionDir,
       "codex",
       `[SYSTEM] Maximum dialog turns (${MAX_TURNS}) reached. Summarize findings and start a new dialog if more discussion is needed.`
     );
