@@ -34,25 +34,17 @@ An MCP server that enables back-and-forth discussions between [Claude Code](http
 ```bash
 git clone https://github.com/clptvn/claude-codex-dialog.git
 cd claude-codex-dialog
-npm install
+npm run setup
 ```
 
-## Setup
+This installs dependencies, registers the MCP server in your Claude Code settings, and installs the `/codex-review-code` and `/codex-review-plan` slash commands globally.
 
-Add the server to your Claude Code MCP configuration (`~/.claude/settings.json` or project-level `.claude/settings.json`):
+Restart Claude Code after installation to pick up the new MCP server.
 
-```json
-{
-  "mcpServers": {
-    "codex-dialog": {
-      "command": "node",
-      "args": ["/absolute/path/to/claude-codex-dialog/src/dialog-server.mjs"]
-    }
-  }
-}
+To uninstall:
+```bash
+npm run uninstall
 ```
-
-Then restart Claude Code. The tools will be available automatically.
 
 ## MCP Tools
 
@@ -82,7 +74,24 @@ Then restart Claude Code. The tools will be available automatically.
 
 ## Usage
 
-Once configured, ask Claude Code to start a session from within a conversation:
+### Slash commands
+
+After installation, two slash commands are available in Claude Code:
+
+```
+/codex-review-code                    Review uncommitted changes
+/codex-review-code staged             Review only staged changes
+/codex-review-code branch             Review current branch vs main
+/codex-review-code commit:<sha>       Review a specific commit
+/codex-review-code staged security    Review staged changes with security focus
+
+/codex-review-plan                    Review an auto-detected plan file
+/codex-review-plan path/to/plan.md    Review a specific plan file
+```
+
+### Natural language
+
+You can also ask Claude directly:
 
 **Dialog:**
 > "Start a dialog with Codex about how to refactor the authentication module"

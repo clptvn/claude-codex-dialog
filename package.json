@@ -4,7 +4,9 @@
   "type": "module",
   "description": "MCP server enabling back-and-forth discussions between Claude Code and Codex CLI",
   "scripts": {
-    "start": "node src/dialog-server.mjs"
+    "start": "node src/dialog-server.mjs",
+    "setup": "./install.sh",
+    "uninstall": "./uninstall.sh"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
