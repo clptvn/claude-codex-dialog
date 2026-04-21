@@ -1,10 +1,12 @@
 #!/bin/bash
 # PreToolUse hook for mcp__codex-dialog__send_message
-# Blocks the send if Claude hasn't read any code since receiving Codex findings.
+# Blocks the send if Claude hasn't read the files Codex referenced.
 
-STATE_FILE="/tmp/codex-dialog-needs-investigation"
+MARKER="/tmp/codex-dialog-required-reads"
+[ -f "$MARKER" ] || exit 0
 
-if [ -f "$STATE_FILE" ]; then
+# Simple flag mode (no specific files extracted)
+if grep -q "^__any__$" "$MARKER"; then
     cat >&2 <<'MSG'
 BLOCKED: You have not investigated Codex's claims. Before responding to Codex, you MUST:
 
@@ -20,4 +22,16 @@ MSG
     exit 2
 fi
 
-exit 0
+# Specific files mode — list what still needs to be read
+REMAINING=$(cat "$MARKER")
+COUNT=$(wc -l < "$MARKER" | tr -d ' ')
+
+cat >&2 <<MSG
+BLOCKED: You still have $COUNT file(s) referenced by Codex that you haven't read:
+
+$REMAINING
+
+Read each of these files before responding. Codex made claims about this code —
+verify those claims yourself before agreeing or disagreeing.
+MSG
+exit 2

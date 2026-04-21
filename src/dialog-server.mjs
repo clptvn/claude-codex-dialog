@@ -55,6 +55,25 @@ function computeBudget(status, messages) {
   };
 }
 
+function extractReferencedFiles(messages) {
+  const files = new Set();
+  for (const msg of messages) {
+    if (msg.from !== "codex") continue;
+    const content = msg.content;
+    // Markdown links: [text](/path/to/file) or [text](/path/to/file:line)
+    for (const m of content.matchAll(/\[([^\]]*)\]\(([^)]+)\)/g)) {
+      let p = m[2].replace(/:\d+$/, "");
+      if (p.includes("/") && !p.startsWith("http")) files.add(p);
+    }
+    // Backtick paths with directory separators: `src/foo.mjs` or `src/foo.mjs:123`
+    for (const m of content.matchAll(/`([^`]*\/[^`]+\.[a-zA-Z]{1,5}(?::\d+)?)`/g)) {
+      let p = m[1].replace(/:\d+$/, "");
+      files.add(p);
+    }
+  }
+  return [...files];
+}
+
 // ── Dialog Tools ────────────────────────────────────────────────────────────
 
 server.tool(
@@ -585,6 +604,7 @@ server.tool(
       : null;
 
     const budget = computeBudget(status, messages);
+    const referencedFiles = extractReferencedFiles(newMessages);
 
     return {
       content: [
@@ -600,6 +620,7 @@ server.tool(
               codex_currently_processing: codexProcessing,
               last_error: lastError,
               budget,
+              referenced_files: referencedFiles,
             },
             null,
             2
