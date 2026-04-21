@@ -10,6 +10,7 @@
  */
 
 import fs from "fs";
+import os from "os";
 import path from "path";
 import { spawn } from "child_process";
 import { readConversation, appendMessage, sleep } from "./shared.mjs";
@@ -32,7 +33,7 @@ const LOG_PATH = path.join(sessionDir, "runner.log");
 
 const MAX_TURNS = HARD_CAP;
 const POLL_INTERVAL_MS = 3000;
-const CODEX_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes per invocation
+const CODEX_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes per invocation
 const MAX_IDLE_MS = 15 * 60 * 1000; // 15 min with no new claude msgs = exit
 const MAX_CONVERSATION_MESSAGES = 30; // truncate older messages in prompt
 
@@ -147,8 +148,8 @@ Respond with ONLY your message. Do NOT wrap it in any JSON or metadata.`;
 
 async function runCodex(prompt) {
   return new Promise((resolve, reject) => {
-    // Write prompt to a file so codex can read it (avoids ARG_MAX issues)
-    const promptPath = path.join(sessionDir, "current_prompt.md");
+    // Write prompt to /tmp so codex can read it (sessionDir is outside codex's sandbox)
+    const promptPath = path.join(os.tmpdir(), `codex-dialog-${Date.now()}-${Math.random().toString(36).slice(2)}.md`);
     fs.writeFileSync(promptPath, prompt);
 
     // Tell codex to read the prompt file - keeps CLI arg short
@@ -195,7 +196,7 @@ async function runCodex(prompt) {
       } catch {}
 
       if (timedOut) {
-        reject(new Error("Codex timed out after 5 minutes"));
+        reject(new Error("Codex timed out after 15 minutes"));
         return;
       }
 

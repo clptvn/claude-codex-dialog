@@ -11,6 +11,7 @@
  */
 
 import fs from "fs";
+import os from "os";
 import path from "path";
 import { spawn } from "child_process";
 import { readConversation, appendMessage, sleep } from "./shared.mjs";
@@ -35,7 +36,7 @@ const LOG_PATH = path.join(sessionDir, "runner.log");
 
 const MAX_TURNS = HARD_CAP;
 const POLL_INTERVAL_MS = 5000;
-const CODEX_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes per invocation
+const CODEX_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes per invocation
 const MAX_IDLE_MS = 30 * 60 * 1000; // 30 min idle timeout
 const MAX_CONVERSATION_MESSAGES = 20;
 const MAX_DIFF_CHARS = 50000;
@@ -187,7 +188,7 @@ Respond with ONLY your message. Do NOT wrap it in any JSON or metadata.`;
 
 async function runCodex(prompt) {
   return new Promise((resolve, reject) => {
-    const promptPath = path.join(sessionDir, "current_prompt.md");
+    const promptPath = path.join(os.tmpdir(), `codex-review-${Date.now()}-${Math.random().toString(36).slice(2)}.md`);
     fs.writeFileSync(promptPath, prompt);
 
     const shortPrompt = `Read the code review prompt file at ${promptPath} and follow its instructions. Respond with your review.`;
@@ -232,7 +233,7 @@ async function runCodex(prompt) {
       } catch {}
 
       if (timedOut) {
-        reject(new Error("Codex timed out after 10 minutes"));
+        reject(new Error("Codex timed out after 15 minutes"));
         return;
       }
 
