@@ -33,9 +33,10 @@ if (fs.existsSync(convPath)) {
   }
 }
 
-// Check for LGTM from codex
+// Check for LGTM from codex — require it at start of line (not preceded by
+// negation like "Not LGTM" or "can't say LGTM")
 const hasLgtm = messages.some(
-  (m) => m.from === "codex" && /\bLGTM\b/i.test(m.content)
+  (m) => m.from === "codex" && /(?:^|\n)\s*LGTM\b/i.test(m.content)
 );
 if (hasLgtm) process.exit(0);
 
