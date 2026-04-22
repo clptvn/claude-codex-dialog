@@ -302,8 +302,14 @@ server.tool(
     const hardCap = softCap + 5;
     const execOpts = { cwd: project_path, timeout: 30000, maxBuffer: 10 * 1024 * 1024 };
 
-    // Resolve current branch name for metadata
-    let currentBranch;
+    // Resolve current branch and HEAD SHA for metadata
+    let currentBranch, headSha;
+    try {
+      headSha = execSync("git rev-parse HEAD", {
+        cwd: project_path,
+        timeout: 10000,
+      }).toString().trim();
+    } catch {}
     try {
       currentBranch = execSync("git rev-parse --abbrev-ref HEAD", {
         cwd: project_path,
@@ -430,6 +436,7 @@ server.tool(
       diff_label: diffLabel,
       branch: headBranchForMeta,
       base_branch: baseBranchForMeta,
+      head_sha: headSha || null,
       review_focus: review_focus || null,
       max_rounds: softCap,
       hard_cap: hardCap,
@@ -593,6 +600,25 @@ server.tool(
     }
     const msg = appendMsg(session_id, "claude", content);
     const status = readStat(session_id);
+
+    // Auto-refresh diff for review sessions so Codex sees mid-review fixes
+    if (status?.type === "review" && status.diff_target && !status.diff_target.startsWith("commit:")) {
+      try {
+        const refreshOpts = { cwd: status.project_path, timeout: 30000, maxBuffer: 10 * 1024 * 1024 };
+        let refreshedDiff;
+        if (status.diff_target === "staged") {
+          refreshedDiff = execSync("git diff --cached", refreshOpts).toString();
+        } else if (status.diff_target === "branch") {
+          const base = status.base_branch || "main";
+          const head = status.branch;
+          refreshedDiff = execFileSync("git", ["diff", `${base}...${head}`], refreshOpts).toString();
+        } else {
+          refreshedDiff = execSync("git diff HEAD", refreshOpts).toString();
+        }
+        fs.writeFileSync(path.join(sessionDir, "diff_refreshed.patch"), refreshedDiff);
+      } catch {}
+    }
+
     const budget = computeBudget(status, readConv(session_id));
     return {
       content: [

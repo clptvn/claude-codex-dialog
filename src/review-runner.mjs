@@ -31,6 +31,7 @@ if (!sessionDir) {
 
 const CONVERSATION_PATH = path.join(sessionDir, "conversation.jsonl");
 const DIFF_PATH = path.join(sessionDir, "diff.patch");
+const REFRESHED_DIFF_PATH = path.join(sessionDir, "diff_refreshed.patch");
 const META_PATH = path.join(sessionDir, "review_meta.json");
 const END_SIGNAL_PATH = path.join(sessionDir, "end_signal");
 const PROCESSING_PATH = path.join(sessionDir, "codex_processing");
@@ -84,7 +85,7 @@ How to use the budget well:
   return block;
 }
 
-function buildReviewPrompt(diff, meta, messages, codexTurns) {
+function buildReviewPrompt(originalDiff, refreshedDiff, meta, messages, codexTurns) {
   let conversationMessages = messages;
   if (messages.length > MAX_CONVERSATION_MESSAGES) {
     const first = messages.slice(0, 2);
@@ -101,12 +102,30 @@ function buildReviewPrompt(diff, meta, messages, codexTurns) {
     ];
   }
 
-  // Truncate diff if huge
-  let diffContent = diff;
+  const activeDiff = refreshedDiff ?? originalDiff;
+  let diffContent = activeDiff;
   let diffTruncated = false;
-  if (diff.length > MAX_DIFF_CHARS) {
-    diffContent = diff.slice(0, MAX_DIFF_CHARS);
+  if (activeDiff.length > MAX_DIFF_CHARS) {
+    diffContent = activeDiff.slice(0, MAX_DIFF_CHARS);
     diffTruncated = true;
+  }
+
+  let diffSection;
+  if (refreshedDiff != null) {
+    diffSection = `## Updated Changes (after fixes)
+
+The original diff was included in your initial review (round 1 above). The reviewer has made fixes since then. Below is the CURRENT state of all changes — compare against the original to verify fixes were applied correctly and check for any new issues introduced by the fixes.
+
+\`\`\`diff
+${diffContent}
+\`\`\`
+${diffTruncated ? `\n**Note:** The updated diff was truncated (${activeDiff.length} chars total, showing first ${MAX_DIFF_CHARS}). Read the full files in the project directory to see all changes.\n` : ""}`;
+  } else {
+    diffSection = `## The Diff
+\`\`\`diff
+${diffContent}
+\`\`\`
+${diffTruncated ? `\n**Note:** The diff was truncated (${activeDiff.length} chars total, showing first ${MAX_DIFF_CHARS}). Read the full files in the project directory to see all changes.\n` : ""}`;
   }
 
   let prompt = `You are a thorough code reviewer examining ${meta.diff_label || `changes on branch "${meta.branch}" compared to "${meta.base_branch}"`}.
@@ -119,11 +138,7 @@ ${meta.review_focus || "General code review — correctness, edge cases, error h
 ## Changed Files
 ${meta.diff_stat || "(no stat available)"}
 
-## The Diff
-\`\`\`diff
-${diffContent}
-\`\`\`
-${diffTruncated ? `\n**Note:** The diff was truncated (${diff.length} chars total, showing first ${MAX_DIFF_CHARS}). Read the full files in the project directory to see all changes.\n` : ""}
+${diffSection}
 
 ## Project Directory
 ${projectPath}
@@ -282,7 +297,7 @@ async function runCodex(prompt) {
 // ── Main loop ────────────────────────────────────────────────────────────────
 
 async function main() {
-  const diff = fs.readFileSync(DIFF_PATH, "utf-8");
+  const originalDiff = fs.readFileSync(DIFF_PATH, "utf-8");
   const meta = JSON.parse(fs.readFileSync(META_PATH, "utf-8"));
 
   let lastProcessedId = 0;
@@ -308,7 +323,7 @@ async function main() {
   } catch {}
 
   try {
-    const prompt = buildReviewPrompt(diff, meta, [], 0);
+    const prompt = buildReviewPrompt(originalDiff, null, meta, [], 0);
     const response = await runCodex(prompt);
 
     if (response) {
@@ -361,7 +376,11 @@ async function main() {
       } catch {}
 
       try {
-        const prompt = buildReviewPrompt(diff, meta, messages, codexTurns);
+        let refreshedDiff = null;
+        if (fs.existsSync(REFRESHED_DIFF_PATH)) {
+          try { refreshedDiff = fs.readFileSync(REFRESHED_DIFF_PATH, "utf-8"); } catch {}
+        }
+        const prompt = buildReviewPrompt(originalDiff, refreshedDiff, meta, messages, codexTurns);
         const response = await runCodex(prompt);
 
         if (response) {
