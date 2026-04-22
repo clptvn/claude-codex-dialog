@@ -55,23 +55,54 @@ function computeBudget(status, messages) {
   };
 }
 
-function extractReferencedFiles(messages) {
-  const files = new Set();
+function extractReferencedFiles(messages, projectPath) {
+  const raw = new Set();
   for (const msg of messages) {
     if (msg.from !== "codex") continue;
     const content = msg.content;
-    // Markdown links: [text](/path/to/file) or [text](/path/to/file:line)
-    for (const m of content.matchAll(/\[([^\]]*)\]\(([^)]+)\)/g)) {
-      let p = m[2].replace(/:\d+$/, "");
-      if (p.includes("/") && !p.startsWith("http")) files.add(p);
+    // Primary: structured REFERENCED_FILES line (machine-readable, Codex fills this in)
+    const refMatch = content.match(/^REFERENCED_FILES:\s*(.+)$/m);
+    if (refMatch) {
+      for (const entry of refMatch[1].split(/,\s*/)) {
+        const p = entry.trim().replace(/:\d+$/, "");
+        if (p) raw.add(p);
+      }
     }
-    // Backtick paths with directory separators: `src/foo.mjs` or `src/foo.mjs:123`
-    for (const m of content.matchAll(/`([^`]*\/[^`]+\.[a-zA-Z]{1,5}(?::\d+)?)`/g)) {
+    // Fallback: markdown links [text](/path/to/file) or [text](/path/to/file:line)
+    for (const m of content.matchAll(/\[([^\]]*)\]\(([^)]+)\)/g)) {
+      let p = m[2].replace(/#.*$/, "").replace(/:\d+$/, "");
+      if (p.includes("/") && !p.startsWith("http")) raw.add(p);
+    }
+    // Fallback: backtick paths — with or without directory separators.
+    // Permissive match; filesystem validation filters false positives.
+    for (const m of content.matchAll(/`([^`\s]+\.[a-zA-Z]{1,5}(?::\d+)?)`/g)) {
       let p = m[1].replace(/:\d+$/, "");
-      files.add(p);
+      raw.add(p);
     }
   }
-  return [...files];
+  // Resolve against project root and validate existence
+  let resolvedRoot;
+  try {
+    resolvedRoot = fs.realpathSync(projectPath || process.cwd());
+  } catch {
+    resolvedRoot = path.resolve(projectPath || process.cwd());
+  }
+  const validated = new Set();
+  for (const p of raw) {
+    let resolved = path.isAbsolute(p)
+      ? p.replace(/#.*$/, "")
+      : path.resolve(resolvedRoot, p);
+    try {
+      resolved = fs.realpathSync(resolved);
+      if (!fs.statSync(resolved).isFile()) continue;
+    } catch {
+      continue; // doesn't exist or not a file — skip
+    }
+    const rel = path.relative(resolvedRoot, resolved);
+    if (rel.startsWith("..") || path.isAbsolute(rel)) continue;
+    validated.add(resolved);
+  }
+  return [...validated];
 }
 
 // ── Dialog Tools ────────────────────────────────────────────────────────────
@@ -604,7 +635,8 @@ server.tool(
       : null;
 
     const budget = computeBudget(status, messages);
-    const referencedFiles = extractReferencedFiles(newMessages);
+    const projectPath = status?.project_path || process.cwd();
+    const referencedFiles = extractReferencedFiles(newMessages, projectPath);
 
     return {
       content: [
@@ -644,6 +676,9 @@ server.tool(
     }
 
     const messages = readConv(session_id);
+    const status = readStat(session_id);
+    const projectPath = status?.project_path || process.cwd();
+    const referencedFiles = extractReferencedFiles(messages, projectPath);
 
     // Return problem for dialogs, meta for reviews
     const problemPath = path.join(sessionDir, "problem.md");
@@ -659,7 +694,7 @@ server.tool(
       content: [
         {
           type: "text",
-          text: JSON.stringify({ problem, review_meta: meta, messages }, null, 2),
+          text: JSON.stringify({ problem, review_meta: meta, messages, referenced_files: referencedFiles }, null, 2),
         },
       ],
     };

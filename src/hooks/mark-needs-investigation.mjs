@@ -1,0 +1,62 @@
+#!/usr/bin/env node
+// PostToolUse hook for mcp__codex-dialog__check_messages
+// Parses the check_messages response, extracts validated referenced_files,
+// and writes them to a session-scoped marker file.
+
+import fs from "fs";
+import path from "path";
+import os from "os";
+
+const input = fs.readFileSync("/dev/stdin", "utf-8");
+let payload;
+try {
+  payload = JSON.parse(input);
+} catch {
+  process.exit(0);
+}
+
+// Claude Code passes tool_response as [{type, text}], but handle the raw
+// MCP shape (content: [{type, text}]) too for robustness.
+const responseText =
+  payload.tool_response?.[0]?.text ??
+  payload.tool_response?.content?.[0]?.text;
+if (!responseText) process.exit(0);
+
+let response;
+try {
+  response = JSON.parse(responseText);
+} catch {
+  process.exit(0);
+}
+
+const referencedFiles = response.referenced_files || [];
+
+// If Codex provided specific file references, always enforce them.
+// If no specific files but severity-tagged findings exist, use __any__ fallback.
+// If neither, nothing to enforce.
+// check_messages uses new_messages, get_full_history uses messages
+const msgs = response.new_messages || response.messages || [];
+const hasTaggedFindings = msgs.some(
+  (m) =>
+    m.from === "codex" &&
+    /\[(CRITICAL|CORRECTNESS|ARCHITECTURE|SECURITY|ROBUSTNESS|SUGGESTION|QUESTION)\]/.test(
+      m.content
+    )
+);
+if (referencedFiles.length === 0 && !hasTaggedFindings) process.exit(0);
+
+const sessionId = payload.tool_input?.session_id;
+if (!sessionId) process.exit(0);
+
+const marker = path.join(os.tmpdir(), `codex-required-reads-${sessionId}`);
+
+// Don't overwrite an existing marker — investigation is still in progress
+if (fs.existsSync(marker)) process.exit(0);
+
+if (referencedFiles.length > 0) {
+  fs.writeFileSync(marker, referencedFiles.join("\n") + "\n");
+} else {
+  fs.writeFileSync(marker, "__any__\n");
+}
+
+process.exit(0);

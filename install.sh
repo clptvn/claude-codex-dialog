@@ -109,10 +109,12 @@ echo "[5/5] Installing investigation hooks..."
 
 mkdir -p "$HOOKS_DIR"
 
-cp "$SCRIPT_DIR/src/hooks/mark-needs-investigation.sh" "$HOOKS_DIR/"
-cp "$SCRIPT_DIR/src/hooks/clear-investigation.sh" "$HOOKS_DIR/"
-cp "$SCRIPT_DIR/src/hooks/enforce-investigation.sh" "$HOOKS_DIR/"
-chmod +x "$HOOKS_DIR"/*.sh
+cp "$SCRIPT_DIR/src/hooks/mark-needs-investigation.mjs" "$HOOKS_DIR/"
+cp "$SCRIPT_DIR/src/hooks/clear-investigation.mjs" "$HOOKS_DIR/"
+cp "$SCRIPT_DIR/src/hooks/enforce-investigation.mjs" "$HOOKS_DIR/"
+
+# Remove old .sh hooks if present
+rm -f "$HOOKS_DIR/mark-needs-investigation.sh" "$HOOKS_DIR/clear-investigation.sh" "$HOOKS_DIR/enforce-investigation.sh"
 
 # Merge hooks into ~/.claude/settings.json
 node -e "
@@ -133,7 +135,7 @@ node -e "
     const preIdx = preHooks.findIndex(h => h.matcher === 'mcp__codex-dialog__send_message');
     const preEntry = {
         matcher: 'mcp__codex-dialog__send_message',
-        hooks: [{ type: 'command', command: 'bash ' + hooksDir + '/enforce-investigation.sh' }]
+        hooks: [{ type: 'command', command: 'node ' + hooksDir + '/enforce-investigation.mjs' }]
     };
     if (preIdx >= 0) preHooks[preIdx] = preEntry;
     else preHooks.push(preEntry);
@@ -142,31 +144,40 @@ node -e "
     if (!config.hooks.PostToolUse) config.hooks.PostToolUse = [];
     const postHooks = config.hooks.PostToolUse;
 
-    const markEntry = {
-        matcher: 'mcp__codex-dialog__check_messages',
-        hooks: [{ type: 'command', command: 'bash ' + hooksDir + '/mark-needs-investigation.sh' }]
-    };
-    const markIdx = postHooks.findIndex(h => h.matcher === 'mcp__codex-dialog__check_messages');
-    if (markIdx >= 0) postHooks[markIdx] = markEntry;
-    else postHooks.push(markEntry);
-
-    // PostToolUse: clear marker when Claude reads code
-    const clearTools = ['Read', 'Grep', 'Glob'];
-    for (const tool of clearTools) {
-        const clearEntry = {
+    // Mark hook on both check_messages and get_full_history (both return Codex claims)
+    const markTools = ['mcp__codex-dialog__check_messages', 'mcp__codex-dialog__get_full_history'];
+    for (const tool of markTools) {
+        const markEntry = {
             matcher: tool,
-            hooks: [{ type: 'command', command: 'bash ' + hooksDir + '/clear-investigation.sh' }]
+            hooks: [{ type: 'command', command: 'node ' + hooksDir + '/mark-needs-investigation.mjs' }]
         };
-        const idx = postHooks.findIndex(h => h.matcher === tool && h.hooks?.[0]?.command?.includes('clear-investigation'));
-        if (idx >= 0) postHooks[idx] = clearEntry;
-        else postHooks.push(clearEntry);
+        const markIdx = postHooks.findIndex(h => h.matcher === tool && h.hooks?.[0]?.command?.includes('mark-needs'));
+        if (markIdx >= 0) postHooks[markIdx] = markEntry;
+        else postHooks.push(markEntry);
+    }
+
+    // PostToolUse: clear marker only on Read (exact file match, no Grep/Glob bypass)
+    const clearEntry = {
+        matcher: 'Read',
+        hooks: [{ type: 'command', command: 'node ' + hooksDir + '/clear-investigation.mjs' }]
+    };
+    const readIdx = postHooks.findIndex(h => h.matcher === 'Read' && h.hooks?.[0]?.command?.includes('clear-investigation'));
+    if (readIdx >= 0) postHooks[readIdx] = clearEntry;
+    else postHooks.push(clearEntry);
+
+    // Remove old Grep/Glob clear hooks if present
+    for (let i = postHooks.length - 1; i >= 0; i--) {
+        if ((postHooks[i].matcher === 'Grep' || postHooks[i].matcher === 'Glob') &&
+            postHooks[i].hooks?.[0]?.command?.includes('clear-investigation')) {
+            postHooks.splice(i, 1);
+        }
     }
 
     fs.writeFileSync(settingsPath, JSON.stringify(config, null, 2) + '\n');
 "
 echo "  enforce-investigation (PreToolUse on send_message) ✓"
-echo "  mark-needs-investigation (PostToolUse on check_messages) ✓"
-echo "  clear-investigation (PostToolUse on Read/Grep/Glob) ✓"
+echo "  mark-needs-investigation (PostToolUse on check_messages + get_full_history) ✓"
+echo "  clear-investigation (PostToolUse on Read only) ✓"
 
 # ── Done ─────────────────────────────────────────────────────────────────────
 

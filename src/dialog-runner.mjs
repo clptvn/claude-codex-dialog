@@ -142,7 +142,12 @@ You can read any files in this directory to understand the code.
 - Be direct and technical. No filler.
 - Respect the round budget above: deliver complete feedback this message; do not save material for later rounds.
 
-Respond with ONLY your message. Do NOT wrap it in any JSON or metadata.`;
+## File References (IMPORTANT)
+At the very end of your response, on its own line, list every source file you referenced or made claims about using exactly this format:
+REFERENCED_FILES: path/to/file1.ext, path/to/file2.ext
+Use paths relative to the project root (${projectPath}). This line is machine-parsed to ensure your discussion partner verifies your claims by reading the actual code. If you made no file-specific claims, omit this line entirely.
+
+Respond with ONLY your message (plus the REFERENCED_FILES line). Do NOT wrap it in any JSON or metadata.`;
 
   return prompt;
 }

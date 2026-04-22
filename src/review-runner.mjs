@@ -152,6 +152,12 @@ You can read any files in this directory to understand context beyond the diff.
 
   const isInitialReview = conversationMessages.length === 0;
 
+  const refFilesBlock = `
+## File References (IMPORTANT)
+At the very end of your response, on its own line, list every source file you referenced or made claims about using exactly this format:
+REFERENCED_FILES: path/to/file1.ext, path/to/file2.ext
+Use paths relative to the project root (${projectPath}). This line is machine-parsed to ensure the reviewer verifies your claims by reading the actual code. If you made no file-specific claims, omit this line entirely.`;
+
   if (isInitialReview) {
     prompt += `## Your Task — Initial Review
 - Examine each changed file carefully. Read the FULL file (not just the diff) to understand context.
@@ -170,8 +176,9 @@ ${meta.review_focus ? `- Prioritize your review around: ${meta.review_focus}` : 
   - **[NIT]** — cosmetic/stylistic. Group into one short trailing "Nits" section or omit entirely.
 - Deliver the COMPLETE review in this message. Do not hold findings back for later rounds.
 - At the end, give an overall assessment: approve, request changes, or needs discussion.
+${refFilesBlock}
 
-Respond with ONLY your review. Do NOT wrap it in any JSON or metadata.`;
+Respond with ONLY your review (plus the REFERENCED_FILES line). Do NOT wrap it in any JSON or metadata.`;
   } else {
     prompt += `## Your Task — Follow-up
 - Address Claude's responses to your review comments.
@@ -180,8 +187,9 @@ Respond with ONLY your review. Do NOT wrap it in any JSON or metadata.`;
 - If new issues came up in discussion, address those too — but only if they meet the same severity bar as the initial review.
 - Deliver complete follow-up this message. Do not split follow-up findings across additional rounds.
 - When all significant issues are resolved, say "LGTM" with a brief summary of what was reviewed and resolved.
+${refFilesBlock}
 
-Respond with ONLY your message. Do NOT wrap it in any JSON or metadata.`;
+Respond with ONLY your message (plus the REFERENCED_FILES line). Do NOT wrap it in any JSON or metadata.`;
   }
 
   return prompt;
