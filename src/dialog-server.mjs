@@ -7,6 +7,10 @@ import { spawn, execSync, execFileSync } from "child_process";
 import crypto from "crypto";
 import {
   DIALOGS_DIR,
+  getAgentDisplayName,
+  getSessionHostAgent,
+  getSessionPartnerAgent,
+  normalizeAgent,
   readConversation,
   appendMessage,
   isProcessAlive,
@@ -39,13 +43,31 @@ function readStat(sessionId) {
   return readStatus(resolveSessionDir(sessionId));
 }
 
+function resolvePartnerCommandValue(
+  partnerAgent,
+  partnerCommand,
+  codexCommand,
+  claudeCommand
+) {
+  if (partnerCommand) return partnerCommand;
+  if (partnerAgent === "claude") return claudeCommand || "claude";
+  return codexCommand || "codex";
+}
+
+function getProcessingPath(sessionDir) {
+  const partnerPath = path.join(sessionDir, "partner_processing");
+  if (fs.existsSync(partnerPath)) return partnerPath;
+  return path.join(sessionDir, "codex_processing");
+}
+
 function computeBudget(status, messages) {
   const maxRounds = status?.max_rounds ?? 5;
   const hardCap = status?.hard_cap ?? maxRounds + 5;
-  // Only real Codex turns count toward the budget. System notices (idle
+  const partnerAgent = getSessionPartnerAgent(status);
+  // Only real partner turns count toward the budget. System notices (idle
   // shutdown, hard-cap reached, error shutdown, etc.) use from: "system"
   // and must not inflate rounds_used past hard_cap.
-  const roundsUsed = messages.filter((m) => m.from === "codex").length;
+  const roundsUsed = messages.filter((m) => m.from === partnerAgent).length;
   const roundsRemaining = Math.max(0, maxRounds - roundsUsed);
   const hardRoundsRemaining = Math.max(0, hardCap - roundsUsed);
   return {
@@ -58,12 +80,12 @@ function computeBudget(status, messages) {
   };
 }
 
-function extractReferencedFiles(messages, projectPath) {
+function extractReferencedFiles(messages, projectPath, partnerAgent = "codex") {
   const raw = new Set();
   for (const msg of messages) {
-    if (msg.from !== "codex") continue;
+    if (msg.from !== partnerAgent) continue;
     const content = msg.content;
-    // Primary: structured REFERENCED_FILES line (machine-readable, Codex fills this in)
+    // Primary: structured REFERENCED_FILES line (machine-readable, the partner fills this in)
     const refMatch = content.match(/^REFERENCED_FILES:\s*(.+)$/m);
     if (refMatch) {
       for (const entry of refMatch[1].split(/,\s*/)) {
@@ -112,21 +134,35 @@ function extractReferencedFiles(messages, projectPath) {
 
 server.tool(
   "start_dialog",
-  "Start a new discussion session with Codex CLI. Spawns a background runner that invokes codex for each turn of the conversation. Enforces a soft round budget (default 5) with a hard cap 5 rounds past that — the budget asks Codex to deliver complete feedback each round instead of drip-feeding.",
+  "Start a new discussion session with a partner CLI. By default the host is Claude and the partner is Codex, but the session can be inverted so Codex hosts and Claude is the partner. Enforces a soft round budget (default 5) with a hard cap 5 rounds past that.",
   {
     problem_description: z
       .string()
-      .describe("The problem to discuss with Codex"),
+      .describe("The problem to discuss with the partner agent"),
     project_path: z
       .string()
       .optional()
-      .describe(
-        "Path to the project directory for context (codex works in this dir)"
-      ),
+      .describe("Path to the project directory for context"),
+    host_agent: z
+      .enum(["claude", "codex"])
+      .optional()
+      .describe("Which agent is orchestrating the session (default: 'claude')"),
+    partner_agent: z
+      .enum(["claude", "codex"])
+      .optional()
+      .describe("Which agent should respond in the background runner (default: 'codex')"),
+    partner_command: z
+      .string()
+      .optional()
+      .describe("Command to invoke the partner CLI. Overrides the agent-specific defaults."),
     codex_command: z
       .string()
       .optional()
-      .describe("Command to invoke codex (default: 'codex')"),
+      .describe("Deprecated alias for partner_command when partner_agent='codex'"),
+    claude_command: z
+      .string()
+      .optional()
+      .describe("Alias for partner_command when partner_agent='claude'"),
     max_rounds: z
       .number()
       .int()
@@ -134,28 +170,56 @@ server.tool(
       .max(50)
       .optional()
       .describe(
-        "Soft round budget (default: 5). Codex is asked to deliver all feedback within this many rounds. Hard cap = max_rounds + 5. Do not override unless the user explicitly requested a different budget."
+        "Soft round budget (default: 5). The partner is asked to deliver all feedback within this many rounds. Hard cap = max_rounds + 5. Do not override unless the user explicitly requested a different budget."
       ),
     reasoning_effort: z
-      .enum(["low", "medium", "high", "xhigh"])
+      .string()
       .optional()
       .describe(
-        "Codex reasoning effort level. Higher = deeper analysis but slower. When omitted, Codex uses its own configured default. Only override if the user explicitly requested a different effort level."
+        "Optional partner-specific reasoning effort level. For Codex this is typically low|medium|high|xhigh; for Claude low|medium|high|xhigh|max."
       ),
     model: z
-      .enum(["gpt-5.4", "gpt-5.3-codex", "gpt-5.4-mini", "gpt-5.3-codex-spark"])
+      .string()
       .optional()
-      .describe(
-        "Codex model to use. Omit to use Codex's default."
-      ),
+      .describe("Optional partner model override. Omit to use the partner CLI default."),
   },
-  async ({ problem_description, project_path, codex_command, max_rounds, reasoning_effort, model }) => {
+  async ({
+    problem_description,
+    project_path,
+    host_agent,
+    partner_agent,
+    partner_command,
+    codex_command,
+    claude_command,
+    max_rounds,
+    reasoning_effort,
+    model,
+  }) => {
+    const hostAgent = normalizeAgent(host_agent, "claude");
+    const partnerAgent = normalizeAgent(partner_agent, "codex");
+    if (hostAgent === partnerAgent) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Error: host_agent and partner_agent must be different",
+          },
+        ],
+      };
+    }
     const sessionId = `dialog-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
     const sessionDir = resolveSessionDir(sessionId);
     fs.mkdirSync(sessionDir, { recursive: true });
 
     const softCap = max_rounds || 5;
     const hardCap = softCap + 5;
+    const partnerCommand = resolvePartnerCommandValue(
+      partnerAgent,
+      partner_command,
+      codex_command,
+      claude_command
+    );
+    const partnerDisplay = getAgentDisplayName(partnerAgent);
 
     // Write problem description
     fs.writeFileSync(path.join(sessionDir, "problem.md"), problem_description);
@@ -169,7 +233,10 @@ server.tool(
       type: "dialog",
       started_at: new Date().toISOString(),
       project_path: project_path || process.cwd(),
-      codex_command: codex_command || "codex",
+      host_agent: hostAgent,
+      partner_agent: partnerAgent,
+      partner_command: partnerCommand,
+      ...(partnerAgent === "codex" ? { codex_command: partnerCommand } : {}),
       max_rounds: softCap,
       hard_cap: hardCap,
       reasoning_effort: reasoning_effort || null,
@@ -187,10 +254,12 @@ server.tool(
       runnerPath,
       sessionDir,
       project_path || process.cwd(),
-      codex_command || "codex",
+      partnerCommand,
       String(softCap),
       reasoning_effort || "",
       model || "",
+      hostAgent,
+      partnerAgent,
     ];
     const runner = spawn(
       "node",
@@ -220,12 +289,15 @@ server.tool(
               session_id: sessionId,
               runner_pid: runner.pid,
               dialog_dir: sessionDir,
+              host_agent: hostAgent,
+              partner_agent: partnerAgent,
+              partner_command: partnerCommand,
               max_rounds: softCap,
               hard_cap: hardCap,
-              reasoning_effort: reasoning_effort || "codex default",
+              reasoning_effort: reasoning_effort || "partner default",
               model: model || "default",
               message:
-                `Dialog started with a soft budget of ${softCap} rounds (hard cap ${hardCap}), model: ${model || "default"}, reasoning effort: ${reasoning_effort || "codex default"}. Send your first message with send_message, then wait for Codex — arm a Monitor on ${sessionDir}/conversation.jsonl instead of sleep-polling check_messages.`,
+                `Dialog started with a soft budget of ${softCap} rounds (hard cap ${hardCap}), model: ${model || "default"}, reasoning effort: ${reasoning_effort || "partner default"}. Send your first message with send_message, then wait for ${partnerDisplay}.`,
             },
             null,
             2
@@ -240,7 +312,7 @@ server.tool(
 
 server.tool(
   "start_code_review",
-  "Start a code review session where Codex reviews changes and discusses them with Claude. Codex automatically generates an initial review from the diff — arm a Monitor on the session's conversation.jsonl to be notified when it lands, then call check_messages to read content. Supports reviewing uncommitted changes, staged changes, or branch-vs-branch diffs. Enforces a soft round budget (default 5) with a hard cap 5 rounds past that — the budget asks Codex to deliver complete feedback each round instead of drip-feeding.",
+  "Start a code review session where the configured partner agent reviews changes in the background. By default the host is Claude and the reviewer is Codex, but the flow can be inverted so Codex hosts and Claude reviews.",
   {
     project_path: z
       .string()
@@ -265,10 +337,26 @@ server.tool(
       .describe(
         "Optional focus area for the review, e.g. 'security', 'performance', 'correctness'"
       ),
+    host_agent: z
+      .enum(["claude", "codex"])
+      .optional()
+      .describe("Which agent is orchestrating the review (default: 'claude')"),
+    partner_agent: z
+      .enum(["claude", "codex"])
+      .optional()
+      .describe("Which agent should review in the background (default: 'codex')"),
+    partner_command: z
+      .string()
+      .optional()
+      .describe("Command to invoke the reviewing partner CLI."),
     codex_command: z
       .string()
       .optional()
-      .describe("Command to invoke codex (default: 'codex')"),
+      .describe("Deprecated alias for partner_command when partner_agent='codex'"),
+    claude_command: z
+      .string()
+      .optional()
+      .describe("Alias for partner_command when partner_agent='claude'"),
     max_rounds: z
       .number()
       .int()
@@ -276,22 +364,46 @@ server.tool(
       .max(50)
       .optional()
       .describe(
-        "Soft round budget (default: 5). Codex is asked to deliver all feedback within this many rounds. Hard cap = max_rounds + 5. Do not override unless the user explicitly requested a different budget."
+        "Soft round budget (default: 5). The reviewer is asked to deliver all feedback within this many rounds. Hard cap = max_rounds + 5. Do not override unless the user explicitly requested a different budget."
       ),
     reasoning_effort: z
-      .enum(["low", "medium", "high", "xhigh"])
+      .string()
       .optional()
       .describe(
-        "Codex reasoning effort level. Higher = deeper analysis but slower. When omitted, Codex uses its own configured default. Only override if the user explicitly requested a different effort level."
+        "Optional partner-specific reasoning effort override."
       ),
     model: z
-      .enum(["gpt-5.4", "gpt-5.3-codex", "gpt-5.4-mini", "gpt-5.3-codex-spark"])
+      .string()
       .optional()
-      .describe(
-        "Codex model to use. Omit to use Codex's default."
-      ),
+      .describe("Optional partner model override."),
   },
-  async ({ project_path, diff_target, branch, base_branch, review_focus, codex_command, max_rounds, reasoning_effort, model }) => {
+  async ({
+    project_path,
+    diff_target,
+    branch,
+    base_branch,
+    review_focus,
+    host_agent,
+    partner_agent,
+    partner_command,
+    codex_command,
+    claude_command,
+    max_rounds,
+    reasoning_effort,
+    model,
+  }) => {
+    const hostAgent = normalizeAgent(host_agent, "claude");
+    const partnerAgent = normalizeAgent(partner_agent, "codex");
+    if (hostAgent === partnerAgent) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Error: host_agent and partner_agent must be different",
+          },
+        ],
+      };
+    }
     const target = diff_target || "uncommitted";
     if (!["staged", "uncommitted", "branch"].includes(target) && !target.startsWith("commit:")) {
       return {
@@ -300,6 +412,13 @@ server.tool(
     }
     const softCap = max_rounds || 5;
     const hardCap = softCap + 5;
+    const partnerCommand = resolvePartnerCommandValue(
+      partnerAgent,
+      partner_command,
+      codex_command,
+      claude_command
+    );
+    const partnerDisplay = getAgentDisplayName(partnerAgent);
     const execOpts = { cwd: project_path, timeout: 30000, maxBuffer: 10 * 1024 * 1024 };
 
     // Resolve current branch and HEAD SHA for metadata
@@ -431,7 +550,10 @@ server.tool(
       type: "review",
       started_at: new Date().toISOString(),
       project_path,
-      codex_command: codex_command || "codex",
+      host_agent: hostAgent,
+      partner_agent: partnerAgent,
+      partner_command: partnerCommand,
+      ...(partnerAgent === "codex" ? { codex_command: partnerCommand } : {}),
       diff_target: target,
       diff_label: diffLabel,
       branch: headBranchForMeta,
@@ -455,10 +577,12 @@ server.tool(
       runnerPath,
       sessionDir,
       project_path,
-      codex_command || "codex",
+      partnerCommand,
       String(softCap),
       reasoning_effort || "",
       model || "",
+      hostAgent,
+      partnerAgent,
     ];
     const runner = spawn(
       "node",
@@ -491,12 +615,15 @@ server.tool(
               diff_label: diffLabel,
               files_changed: meta.files_changed.length,
               diff_size: diff.length,
+              host_agent: hostAgent,
+              partner_agent: partnerAgent,
+              partner_command: partnerCommand,
               max_rounds: softCap,
               hard_cap: hardCap,
-              reasoning_effort: reasoning_effort || "codex default",
+              reasoning_effort: reasoning_effort || "partner default",
               model: model || "default",
               message:
-                `Code review started with a soft budget of ${softCap} rounds (hard cap ${hardCap}), model: ${model || "default"}, reasoning effort: ${reasoning_effort || "codex default"}. Codex is generating an initial review — arm a Monitor on ${sessionDir}/conversation.jsonl to be notified when it lands, then call check_messages to read the content. Avoid sleep-polling.`,
+                `Code review started with a soft budget of ${softCap} rounds (hard cap ${hardCap}), model: ${model || "default"}, reasoning effort: ${reasoning_effort || "partner default"}. ${partnerDisplay} is generating an initial review.`,
             },
             null,
             2
@@ -520,6 +647,8 @@ server.tool(
     }
 
     const messages = readConv(session_id);
+    const status = readStat(session_id);
+    const partnerAgent = getSessionPartnerAgent(status);
 
     const metaPath = path.join(sessionDir, "review_meta.json");
     let meta = null;
@@ -544,7 +673,7 @@ server.tool(
       FINDING_CATEGORIES.map((c) => [c.toLowerCase(), []])
     );
     for (const msg of messages) {
-      if (msg.from !== "codex") continue;
+      if (msg.from !== partnerAgent) continue;
       const lines = msg.content.split("\n");
       for (const line of lines) {
         for (const cat of FINDING_CATEGORIES) {
@@ -556,10 +685,9 @@ server.tool(
     }
 
     const hasLgtm = messages.some(
-      (m) => m.from === "codex" && /\bLGTM\b/i.test(m.content)
+      (m) => m.from === partnerAgent && /(?:^|\n)\s*LGTM\b/i.test(m.content)
     );
 
-    const status = readStat(session_id);
     const budget = computeBudget(status, messages);
 
     return {
@@ -588,10 +716,10 @@ server.tool(
 
 server.tool(
   "send_message",
-  "Send a message to Codex in an ongoing dialog or review session. The background runner will detect it and invoke Codex to respond.",
+  "Send a message to the configured partner session. The background runner will detect it and invoke the partner CLI to respond.",
   {
     session_id: z.string().describe("The session ID (dialog or review)"),
-    content: z.string().describe("Your message to Codex"),
+    content: z.string().describe("Your message to the partner agent"),
   },
   async ({ session_id, content }) => {
     const sessionDir = resolveSessionDir(session_id);
@@ -599,6 +727,9 @@ server.tool(
       return { content: [{ type: "text", text: "Error: Session not found" }] };
     }
     const status = readStat(session_id);
+    const hostAgent = getSessionHostAgent(status);
+    const partnerAgent = getSessionPartnerAgent(status);
+    const partnerDisplay = getAgentDisplayName(partnerAgent);
 
     // Auto-refresh diff BEFORE appending message so it's ready when the runner
     // sees the new message and immediately starts building the prompt.
@@ -632,7 +763,7 @@ server.tool(
       }
     }
 
-    const msg = appendMsg(session_id, "claude", content);
+    const msg = appendMsg(session_id, hostAgent, content);
     const budget = computeBudget(status, readConv(session_id));
     return {
       content: [
@@ -642,8 +773,10 @@ server.tool(
             {
               sent: true,
               message_id: msg.id,
+              host_agent: hostAgent,
+              partner_agent: partnerAgent,
               budget,
-              message: `Message sent (id: ${msg.id}). Codex will be invoked to respond. Arm a Monitor on the session's conversation.jsonl to be notified when the reply lands, then call check_messages to read it.`,
+              message: `Message sent (id: ${msg.id}). ${partnerDisplay} will be invoked to respond.`,
             },
             null,
             2
@@ -656,7 +789,7 @@ server.tool(
 
 server.tool(
   "check_messages",
-  "Check for new messages from Codex. Returns messages after the given ID, plus status info about whether Codex is still processing. Prefer Monitor on the session's conversation.jsonl to WAIT for new messages; use this tool to READ content once notified.",
+  "Check for new messages from the configured partner agent. Returns messages after the given ID, plus runner status.",
   {
     session_id: z.string().describe("The session ID (dialog or review)"),
     since_id: z
@@ -676,13 +809,14 @@ server.tool(
 
     // Check runner status
     const status = readStat(session_id);
+    const hostAgent = getSessionHostAgent(status);
+    const partnerAgent = getSessionPartnerAgent(status);
     const runnerAlive = status?.runner_pid
       ? isProcessAlive(status.runner_pid)
       : false;
 
-    // Check if codex is currently being invoked
-    const processingPath = path.join(sessionDir, "codex_processing");
-    const codexProcessing = fs.existsSync(processingPath);
+    const processingPath = getProcessingPath(sessionDir);
+    const partnerProcessing = fs.existsSync(processingPath);
 
     // Check for errors
     const errorPath = path.join(sessionDir, "last_error.txt");
@@ -692,7 +826,11 @@ server.tool(
 
     const budget = computeBudget(status, messages);
     const projectPath = status?.project_path || process.cwd();
-    const referencedFiles = extractReferencedFiles(newMessages, projectPath);
+    const referencedFiles = extractReferencedFiles(
+      newMessages,
+      projectPath,
+      partnerAgent
+    );
 
     return {
       content: [
@@ -704,8 +842,12 @@ server.tool(
               total_messages: messages.length,
               latest_id:
                 messages.length > 0 ? messages[messages.length - 1].id : 0,
+              host_agent: hostAgent,
+              partner_agent: partnerAgent,
+              partner_runner_alive: runnerAlive,
+              partner_currently_processing: partnerProcessing,
               codex_runner_alive: runnerAlive,
-              codex_currently_processing: codexProcessing,
+              codex_currently_processing: partnerProcessing,
               last_error: lastError,
               budget,
               referenced_files: referencedFiles,
@@ -733,8 +875,13 @@ server.tool(
 
     const messages = readConv(session_id);
     const status = readStat(session_id);
+    const partnerAgent = getSessionPartnerAgent(status);
     const projectPath = status?.project_path || process.cwd();
-    const referencedFiles = extractReferencedFiles(messages, projectPath);
+    const referencedFiles = extractReferencedFiles(
+      messages,
+      projectPath,
+      partnerAgent
+    );
 
     // Return problem for dialogs, meta for reviews
     const problemPath = path.join(sessionDir, "problem.md");
@@ -760,7 +907,7 @@ server.tool(
 
 server.tool(
   "check_partner_alive",
-  "Check if the Codex runner process is still alive and get detailed status.",
+  "Check if the partner runner process is still alive and get detailed status.",
   {
     session_id: z.string().describe("The session ID (dialog or review)"),
   },
@@ -771,20 +918,23 @@ server.tool(
     }
 
     const status = readStat(session_id);
+    const partnerAgent = getSessionPartnerAgent(status);
     const alive = status?.runner_pid
       ? isProcessAlive(status.runner_pid)
       : false;
 
-    const processingPath = path.join(sessionDir, "codex_processing");
+    const processingPath = getProcessingPath(sessionDir);
     const processing = fs.existsSync(processingPath);
 
     const messages = readConv(session_id);
-    const lastCodexMsg = [...messages].reverse().find((m) => m.from === "codex");
-    const lastCodexTime = lastCodexMsg
-      ? new Date(lastCodexMsg.timestamp)
+    const lastPartnerMsg = [...messages]
+      .reverse()
+      .find((m) => m.from === partnerAgent);
+    const lastPartnerTime = lastPartnerMsg
+      ? new Date(lastPartnerMsg.timestamp)
       : null;
-    const secondsSinceLastCodex = lastCodexTime
-      ? (Date.now() - lastCodexTime.getTime()) / 1000
+    const secondsSinceLastPartner = lastPartnerTime
+      ? (Date.now() - lastPartnerTime.getTime()) / 1000
       : null;
 
     const errorPath = path.join(sessionDir, "last_error.txt");
@@ -809,10 +959,14 @@ server.tool(
           text: JSON.stringify(
             {
               session_type: status?.type || "unknown",
+              host_agent: getSessionHostAgent(status),
+              partner_agent: partnerAgent,
               runner_alive: alive,
               runner_pid: status?.runner_pid,
+              partner_currently_processing: processing,
+              seconds_since_last_partner_message: secondsSinceLastPartner,
               codex_currently_processing: processing,
-              seconds_since_last_codex_message: secondsSinceLastCodex,
+              seconds_since_last_codex_message: secondsSinceLastPartner,
               last_error: lastError,
               started_at: status?.started_at,
               recent_log: logTail,
@@ -898,6 +1052,8 @@ server.tool(
           session_id: sessionId,
           type: sessionId.startsWith("review-") ? "review" : "dialog",
           started_at: status?.started_at,
+          host_agent: getSessionHostAgent(status),
+          partner_agent: getSessionPartnerAgent(status),
           message_count: messages.length,
           runner_alive: alive,
           budget,

@@ -1,61 +1,62 @@
 #!/usr/bin/env node
 /**
- * Review Runner - Background process that manages codex code review invocations
+ * Review Runner - Background process that manages partner code review invocations
  *
  * Similar to dialog-runner.mjs but specialized for code review:
- * - Auto-starts: Codex generates an initial review from the diff without waiting for Claude
+ * - Auto-starts: the partner generates an initial review from the diff
  * - Longer timeouts to account for both sides investigating code
  * - Review-specific prompts with diff context and structured feedback categories
- *
- * Usage: node review-runner.mjs <session-dir> <project-path> [codex-command]
  */
 
 import fs from "fs";
-import os from "os";
 import path from "path";
-import { spawn } from "child_process";
-import { readConversation, appendMessage, sleep } from "./shared.mjs";
+import {
+  appendMessage,
+  getAgentDisplayName,
+  normalizeAgent,
+  readConversation,
+  sleep,
+} from "./shared.mjs";
+import { runPartnerCommand } from "./partner-invocation.mjs";
 
 const sessionDir = process.argv[2];
 const projectPath = process.argv[3] || process.cwd();
-const codexCommand = process.argv[4] || "codex";
+const partnerCommand = process.argv[4] || "codex";
 const SOFT_CAP = parseInt(process.argv[5], 10) || 5;
 const HARD_CAP = SOFT_CAP + 5;
 const REASONING_EFFORT = process.argv[6] || null;
-const CODEX_MODEL = process.argv[7] || null;
-const VALID_EFFORTS = ["low", "medium", "high", "xhigh"];
+const PARTNER_MODEL = process.argv[7] || null;
+const HOST_AGENT = normalizeAgent(process.argv[8], "claude");
+const PARTNER_AGENT = normalizeAgent(process.argv[9], "codex");
 
-if (!sessionDir) {
+if (!sessionDir || HOST_AGENT === PARTNER_AGENT) {
   process.exit(1);
 }
 
-const CONVERSATION_PATH = path.join(sessionDir, "conversation.jsonl");
+const HOST_DISPLAY = getAgentDisplayName(HOST_AGENT);
+const PARTNER_DISPLAY = getAgentDisplayName(PARTNER_AGENT);
 const DIFF_PATH = path.join(sessionDir, "diff.patch");
 const REFRESHED_DIFF_PATH = path.join(sessionDir, "diff_refreshed.patch");
 const META_PATH = path.join(sessionDir, "review_meta.json");
 const END_SIGNAL_PATH = path.join(sessionDir, "end_signal");
-const PROCESSING_PATH = path.join(sessionDir, "codex_processing");
+const PROCESSING_PATH = path.join(sessionDir, "partner_processing");
 const ERROR_PATH = path.join(sessionDir, "last_error.txt");
 const LOG_PATH = path.join(sessionDir, "runner.log");
 
 const MAX_TURNS = HARD_CAP;
 const POLL_INTERVAL_MS = 5000;
-const CODEX_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes per invocation
-const MAX_IDLE_MS = 30 * 60 * 1000; // 30 min idle timeout
+const PARTNER_TIMEOUT_MS = 15 * 60 * 1000;
+const MAX_IDLE_MS = 30 * 60 * 1000;
 const MAX_CONVERSATION_MESSAGES = 20;
 const MAX_DIFF_CHARS = 50000;
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
 
 function log(msg) {
   const ts = new Date().toISOString();
   fs.appendFileSync(LOG_PATH, `[${ts}] ${msg}\n`);
 }
 
-// ── Review prompt builder ───────────────────────────────────────────────────
-
-function buildRoundBudgetBlock(codexTurns, softCap, hardCap) {
-  const currentRound = codexTurns + 1;
+function buildRoundBudgetBlock(partnerTurns, softCap, hardCap) {
+  const currentRound = partnerTurns + 1;
   const remaining = Math.max(0, softCap - currentRound);
   const pastSoft = currentRound > softCap;
 
@@ -85,7 +86,7 @@ How to use the budget well:
   return block;
 }
 
-function buildReviewPrompt(originalDiff, refreshedDiff, meta, messages, codexTurns) {
+function buildReviewPrompt(originalDiff, refreshedDiff, meta, messages, partnerTurns) {
   let conversationMessages = messages;
   if (messages.length > MAX_CONVERSATION_MESSAGES) {
     const first = messages.slice(0, 2);
@@ -114,7 +115,7 @@ function buildReviewPrompt(originalDiff, refreshedDiff, meta, messages, codexTur
   if (refreshedDiff != null) {
     diffSection = `## Updated Changes (after fixes)
 
-The original diff was included in your initial review (round 1 above). The reviewer has made fixes since then. Below is the CURRENT state of all changes — compare against the original to verify fixes were applied correctly and check for any new issues introduced by the fixes.
+The original diff was included in your initial review (round 1 above). The reviewer has made fixes since then. Below is the current state of all changes. Compare against the original to verify fixes were applied correctly and check for any new issues introduced by the fixes.
 
 \`\`\`diff
 ${diffContent}
@@ -130,7 +131,7 @@ ${diffTruncated ? `\n**Note:** The diff was truncated (${activeDiff.length} char
 
   let prompt = `You are a thorough code reviewer examining ${meta.diff_label || `changes on branch "${meta.branch}" compared to "${meta.base_branch}"`}.
 
-${buildRoundBudgetBlock(codexTurns, SOFT_CAP, HARD_CAP)}
+${buildRoundBudgetBlock(partnerTurns, SOFT_CAP, HARD_CAP)}
 
 ## Review Focus
 ${meta.review_focus || "General code review — correctness, edge cases, error handling, naming, test coverage."}
@@ -155,27 +156,27 @@ You can read any files in this directory to understand context beyond the diff.
         continue;
       }
       const speaker =
-        msg.from === "claude"
-          ? "Claude"
+        msg.from === HOST_AGENT
+          ? HOST_DISPLAY
           : msg.from === "system"
             ? "System"
-            : "Codex (you)";
+            : `${PARTNER_DISPLAY} (you)`;
       prompt += `\n### ${speaker} [message #${msg.id}]:\n${msg.content}\n`;
     }
     prompt += `\n`;
   }
 
-  const isInitialReview = codexTurns === 0;
+  const isInitialReview = partnerTurns === 0;
 
   const refFilesBlock = `
 ## File References (IMPORTANT)
 At the very end of your response, on its own line, list every source file you referenced or made claims about using exactly this format:
 REFERENCED_FILES: path/to/file1.ext, path/to/file2.ext
-Use paths relative to the project root (${projectPath}). This line is machine-parsed to ensure the reviewer verifies your claims by reading the actual code. If you made no file-specific claims, omit this line entirely.`;
+Use paths relative to the project root (${projectPath}). This line is machine-parsed to ensure your discussion partner verifies your claims by reading the actual code. If you made no file-specific claims, omit this line entirely.`;
 
   if (isInitialReview) {
     prompt += `## Your Task — Initial Review
-- Examine each changed file carefully. Read the FULL file (not just the diff) to understand context.
+- Examine each changed file carefully. Read the full file (not just the diff) to understand context.
 - For each significant finding, cite the file and line number.
 - Be specific. "This might have issues" is not useful. "Line 42 of foo.ts: the null check is missing for the case where X is undefined because Y" is useful.
 ${meta.review_focus ? `- Prioritize your review around: ${meta.review_focus}` : ""}
@@ -189,18 +190,18 @@ ${meta.review_focus ? `- Prioritize your review around: ${meta.review_focus}` : 
   - **[QUESTION]** — needs clarification before you can conclude. Used sparingly.
   - **[PRAISE]** — optional; call out a pattern genuinely worth keeping, kept to one or two lines. Only when honest — forced praise is worthless.
   - **[NIT]** — cosmetic/stylistic. Group into one short trailing "Nits" section or omit entirely.
-- Deliver the COMPLETE review in this message. Do not hold findings back for later rounds.
+- Deliver the complete review in this message. Do not hold findings back for later rounds.
 - At the end, give an overall assessment: approve, request changes, or needs discussion.
 ${refFilesBlock}
 
 Respond with ONLY your review (plus the REFERENCED_FILES line). Do NOT wrap it in any JSON or metadata.`;
   } else {
     prompt += `## Your Task — Follow-up
-- Address Claude's responses to your review comments.
-- If Claude fixed something, verify the fix looks correct by reading the current file.
-- If Claude disagreed with a finding, either accept their reasoning or explain why you still think there's an issue.
+- Address ${HOST_DISPLAY}'s responses to your review comments.
+- If ${HOST_DISPLAY} fixed something, verify the fix looks correct by reading the current file.
+- If ${HOST_DISPLAY} disagreed with a finding, either accept the reasoning or explain why you still think there is an issue.
 - If new issues came up in discussion, address those too — but only if they meet the same severity bar as the initial review.
-- Deliver complete follow-up this message. Do not split follow-up findings across additional rounds.
+- Deliver complete follow-up in this message. Do not split follow-up findings across additional rounds.
 - When all significant issues are resolved, say "LGTM" with a brief summary of what was reviewed and resolved.
 ${refFilesBlock}
 
@@ -210,98 +211,12 @@ Respond with ONLY your message (plus the REFERENCED_FILES line). Do NOT wrap it 
   return prompt;
 }
 
-// ── Codex invocation ─────────────────────────────────────────────────────────
-
-async function runCodex(prompt) {
-  return new Promise((resolve, reject) => {
-    const promptPath = path.join(os.tmpdir(), `codex-review-${Date.now()}-${Math.random().toString(36).slice(2)}.md`);
-    fs.writeFileSync(promptPath, prompt);
-
-    const shortPrompt = `Read the code review prompt file at ${promptPath} and follow its instructions. Respond with your review.`;
-
-    log(`Invoking ${codexCommand} for review (prompt: ${prompt.length} chars)`);
-
-    const args = ["exec", "--full-auto"];
-    if (CODEX_MODEL) {
-      args.push("--model", CODEX_MODEL);
-    }
-    if (REASONING_EFFORT && VALID_EFFORTS.includes(REASONING_EFFORT)) {
-      args.push("-c", `model_reasoning_effort=${REASONING_EFFORT}`);
-    }
-    args.push(shortPrompt);
-
-    const codex = spawn(codexCommand, args, {
-      cwd: projectPath,
-      stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env },
-    });
-
-    let stdout = "";
-    let stderr = "";
-    let timedOut = false;
-
-    const timer = setTimeout(() => {
-      timedOut = true;
-      log("Codex review invocation timed out, killing process");
-      try {
-        codex.kill("SIGTERM");
-      } catch {}
-      setTimeout(() => {
-        try {
-          codex.kill("SIGKILL");
-        } catch {}
-      }, 10000);
-    }, CODEX_TIMEOUT_MS);
-
-    codex.stdout.on("data", (data) => {
-      stdout += data.toString();
-    });
-
-    codex.stderr.on("data", (data) => {
-      stderr += data.toString();
-    });
-
-    codex.on("close", (code) => {
-      clearTimeout(timer);
-      try {
-        fs.unlinkSync(promptPath);
-      } catch {}
-
-      if (timedOut) {
-        reject(new Error("Codex timed out after 15 minutes"));
-        return;
-      }
-
-      const response = stdout.trim();
-      if (response) {
-        resolve(response);
-      } else {
-        reject(
-          new Error(
-            `Codex exited with code ${code}, no stdout. stderr: ${stderr.slice(0, 500)}`
-          )
-        );
-      }
-    });
-
-    codex.on("error", (err) => {
-      clearTimeout(timer);
-      try {
-        fs.unlinkSync(promptPath);
-      } catch {}
-      reject(err);
-    });
-  });
-}
-
-// ── Main loop ────────────────────────────────────────────────────────────────
-
 async function main() {
   const originalDiff = fs.readFileSync(DIFF_PATH, "utf-8");
   const meta = JSON.parse(fs.readFileSync(META_PATH, "utf-8"));
 
   let lastProcessedId = 0;
-  let codexTurns = 0;
+  let partnerTurns = 0;
   let lastActivityTime = Date.now();
   let consecutiveErrors = 0;
   const MAX_CONSECUTIVE_ERRORS = 3;
@@ -309,14 +224,15 @@ async function main() {
   log("=== Review runner started ===");
   log(`Project: ${projectPath}`);
   log(`Branch: ${meta.branch} vs ${meta.base_branch}`);
-  log(`Codex command: ${codexCommand}`);
+  log(`Host agent: ${HOST_DISPLAY}`);
+  log(`Partner agent: ${PARTNER_DISPLAY}`);
+  log(`Partner command: ${partnerCommand}`);
   log(`Review focus: ${meta.review_focus || "general"}`);
-  log(`Soft cap: ${SOFT_CAP} rounds, hard cap: ${HARD_CAP} rounds, Codex timeout: ${CODEX_TIMEOUT_MS / 1000}s, Idle timeout: ${MAX_IDLE_MS / 1000}s`);
-  log(`Model: ${CODEX_MODEL || "default"}`);
-  log(`Reasoning effort: ${REASONING_EFFORT || "codex default"}`);
+  log(`Soft cap: ${SOFT_CAP} rounds, hard cap: ${HARD_CAP} rounds, Partner timeout: ${PARTNER_TIMEOUT_MS / 1000}s, Idle timeout: ${MAX_IDLE_MS / 1000}s`);
+  log(`Model: ${PARTNER_MODEL || "default"}`);
+  log(`Reasoning effort: ${REASONING_EFFORT || "partner default"}`);
 
-  // ── Auto-start: generate initial review without waiting for Claude ──
-  log("Generating initial review from diff...");
+  log(`Generating initial review from diff with ${PARTNER_DISPLAY}...`);
   fs.writeFileSync(PROCESSING_PATH, new Date().toISOString());
   try {
     fs.unlinkSync(ERROR_PATH);
@@ -324,16 +240,25 @@ async function main() {
 
   try {
     const prompt = buildReviewPrompt(originalDiff, null, meta, [], 0);
-    const response = await runCodex(prompt);
+    const response = await runPartnerCommand({
+      partnerAgent: PARTNER_AGENT,
+      partnerCommand,
+      prompt,
+      projectPath,
+      model: PARTNER_MODEL,
+      reasoningEffort: REASONING_EFFORT,
+      timeoutMs: PARTNER_TIMEOUT_MS,
+      log,
+      tempPrefix: `${PARTNER_AGENT}-review`,
+      responseInstruction: "Respond with your review.",
+    });
 
-    if (response) {
-      appendMessage(sessionDir, "codex", response);
-      codexTurns++;
-      lastActivityTime = Date.now();
-      log(`Initial review complete (${response.length} chars). Waiting for Claude...`);
-    } else {
-      throw new Error("Empty response from codex on initial review");
-    }
+    appendMessage(sessionDir, PARTNER_AGENT, response);
+    partnerTurns++;
+    lastActivityTime = Date.now();
+    log(
+      `Initial review complete (${response.length} chars). Waiting for ${HOST_DISPLAY}...`
+    );
   } catch (err) {
     consecutiveErrors++;
     log(`Error on initial review: ${err.message}`);
@@ -341,7 +266,7 @@ async function main() {
     appendMessage(
       sessionDir,
       "system",
-      `Failed to generate initial review: ${err.message}. Claude can still send messages to retry.`
+      `Failed to generate initial review: ${err.message}. ${HOST_DISPLAY} can still send messages to retry.`
     );
   }
 
@@ -349,35 +274,36 @@ async function main() {
     fs.unlinkSync(PROCESSING_PATH);
   } catch {}
 
-  // ── Poll loop: wait for Claude responses ──
-  while (codexTurns < MAX_TURNS) {
+  while (partnerTurns < MAX_TURNS) {
     if (fs.existsSync(END_SIGNAL_PATH)) {
       log("End signal detected, shutting down gracefully");
       break;
     }
 
-    // Read messages and refreshed diff back-to-back to minimize snapshot mismatch.
-    // KNOWN RACE: a concurrent send_message can overwrite diff_refreshed.patch between
-    // these two reads, causing the prompt to pair messages M with diff D(M+1). The worst
-    // case is a slightly newer diff (more fixes visible), which is benign — not a
-    // correctness bug. Versioned per-message diffs were considered and rejected in favor
-    // of simplicity (no disk accumulation, no cleanup logic).
     const messages = readConversation(sessionDir);
     let refreshedDiff = null;
     if (fs.existsSync(REFRESHED_DIFF_PATH)) {
-      try { refreshedDiff = fs.readFileSync(REFRESHED_DIFF_PATH, "utf-8"); } catch {}
+      try {
+        refreshedDiff = fs.readFileSync(REFRESHED_DIFF_PATH, "utf-8");
+      } catch {}
     }
 
-    const newClaudeMessages = messages.filter(
-      (m) => m.id > lastProcessedId && m.from === "claude"
+    const newHostMessages = messages.filter(
+      (m) => m.id > lastProcessedId && m.from === HOST_AGENT
     );
 
-    if (newClaudeMessages.length > 0) {
+    if (newHostMessages.length > 0) {
       lastActivityTime = Date.now();
-      lastProcessedId = messages.reduce((max, m) => typeof m.id === "number" && Number.isSafeInteger(m.id) && m.id > max ? m.id : max, 0);
+      lastProcessedId = messages.reduce(
+        (max, m) =>
+          typeof m.id === "number" && Number.isSafeInteger(m.id) && m.id > max
+            ? m.id
+            : max,
+        0
+      );
 
       log(
-        `New Claude message(s) detected (latest id: ${lastProcessedId}). Starting review turn ${codexTurns + 1}...`
+        `New ${HOST_DISPLAY} message(s) detected (latest id: ${lastProcessedId}). Starting review turn ${partnerTurns + 1}...`
       );
 
       fs.writeFileSync(PROCESSING_PATH, new Date().toISOString());
@@ -386,23 +312,41 @@ async function main() {
       } catch {}
 
       try {
-        const prompt = buildReviewPrompt(originalDiff, refreshedDiff, meta, messages, codexTurns);
-        const response = await runCodex(prompt);
+        const prompt = buildReviewPrompt(
+          originalDiff,
+          refreshedDiff,
+          meta,
+          messages,
+          partnerTurns
+        );
+        const response = await runPartnerCommand({
+          partnerAgent: PARTNER_AGENT,
+          partnerCommand,
+          prompt,
+          projectPath,
+          model: PARTNER_MODEL,
+          reasoningEffort: REASONING_EFFORT,
+          timeoutMs: PARTNER_TIMEOUT_MS,
+          log,
+          tempPrefix: `${PARTNER_AGENT}-review`,
+          responseInstruction: "Respond with your review.",
+        });
 
-        if (response) {
-          appendMessage(sessionDir, "codex", response);
-          codexTurns++;
-          consecutiveErrors = 0;
-          log(
-            `Review turn ${codexTurns} complete (${response.length} chars). Waiting for Claude...`
-          );
-        } else {
-          throw new Error("Empty response from codex");
-        }
+        appendMessage(sessionDir, PARTNER_AGENT, response);
+        partnerTurns++;
+        consecutiveErrors = 0;
+        log(
+          `Review turn ${partnerTurns} complete (${response.length} chars). Waiting for ${HOST_DISPLAY}...`
+        );
       } catch (err) {
         consecutiveErrors++;
-        log(`Error on review turn: ${err.message} (${consecutiveErrors}/${MAX_CONSECUTIVE_ERRORS})`);
-        fs.writeFileSync(ERROR_PATH, `${err.message}\n\nConsecutive errors: ${consecutiveErrors}`);
+        log(
+          `Error on review turn: ${err.message} (${consecutiveErrors}/${MAX_CONSECUTIVE_ERRORS})`
+        );
+        fs.writeFileSync(
+          ERROR_PATH,
+          `${err.message}\n\nConsecutive errors: ${consecutiveErrors}`
+        );
 
         if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
           log("Too many consecutive errors, shutting down");
@@ -434,12 +378,12 @@ async function main() {
     await sleep(POLL_INTERVAL_MS);
   }
 
-  if (codexTurns >= MAX_TURNS) {
+  if (partnerTurns >= MAX_TURNS) {
     log(`Hard cap (${HARD_CAP}) reached`);
     appendMessage(
       sessionDir,
       "system",
-      `Hard round cap (${HARD_CAP}) reached — soft budget was ${SOFT_CAP}. No further Codex turns will be invoked in this session. Summarize remaining findings and start a new review if more discussion is needed.`
+      `Hard round cap (${HARD_CAP}) reached — soft budget was ${SOFT_CAP}. No further ${PARTNER_DISPLAY} turns will be invoked in this session. Summarize remaining findings and start a new review if more discussion is needed.`
     );
   }
 

@@ -1,42 +1,42 @@
 # claude-codex-dialog
 
-An MCP server that enables back-and-forth discussions between [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [Codex CLI](https://github.com/openai/codex). Spawns background runners that manage conversation turns, letting the two AI assistants collaboratively analyze problems, review code, and debate solutions.
+A bidirectional MCP server for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [Codex CLI](https://github.com/openai/codex). It runs background review/dialog runners so either tool can host the conversation while the other acts as the reviewing partner.
 
 ## Features
 
-- **General Dialog** — Open-ended technical discussions between Claude and Codex about any problem
-- **Code Review** — Codex automatically reviews a git diff and discusses findings with Claude, going back and forth on fixes
-- **Plan Review** — Codex adversarially reviews an implementation plan (the HOW) before any code is written, catching feasibility and ordering issues early
-- **Spec Review** — Codex adversarially reviews a product/feature specification (the WHAT/WHY) for gaps, ambiguity, scope creep, and untestable acceptance criteria before a plan or code gets written
-- **Code Audit** — Codex performs a comprehensive audit of existing files (not just changes) for bugs, architecture issues, correctness, security, and more
+- **Bidirectional host support** — Claude can host Codex reviews, or Codex can host Claude reviews
+- **General Dialog** — open-ended technical discussions between the two agents
+- **Code Review** — the partner agent auto-generates an initial review from a git diff
+- **Plan Review** — adversarial review of implementation plans before code is written
+- **Spec Review** — adversarial review of product/feature specs before planning or implementation
+- **Code Audit** — deep audits of existing files for bugs, architecture issues, robustness, and security
+- **Claude-only enforcement hooks** — optional guardrails on the Claude side; no equivalent Codex hooks are installed
 
 ## How it works
 
 ### Dialog mode
-1. Claude calls `start_dialog` with a problem description
-2. The server spawns a background runner process
-3. Claude sends messages via `send_message`, and the runner invokes Codex to respond
-4. Claude waits for replies by arming a Monitor on the session's `conversation.jsonl`, then reads the content with `check_messages` once notified
-5. The conversation continues back and forth until ended or a turn/idle limit is reached
+1. The host agent calls `start_dialog`
+2. The server spawns a background runner for the configured partner agent
+3. The host sends messages with `send_message`
+4. The runner invokes the partner CLI and appends replies to `conversation.jsonl`
+5. The conversation continues until ended, idle timeout, or hard round cap
 
 ### Code review mode
-1. Claude calls `start_code_review` with a project path and branch info
+1. The host agent calls `start_code_review`
 2. The server generates a git diff and spawns a review runner
-3. Codex **automatically generates an initial review** from the diff — no first message needed
-4. Claude waits for the review via Monitor, then reads it via `check_messages` and responds with fixes or discussion
-5. Back and forth continues until Codex says "LGTM" or the session is ended
-6. Review findings are categorized as `[CRITICAL]`, `[CORRECTNESS]`, `[ARCHITECTURE]`, `[SECURITY]`, `[ROBUSTNESS]`, `[SUGGESTION]`, `[QUESTION]`, `[PRAISE]` (optional), or `[NIT]` (cosmetic, grouped at the end)
+3. The partner agent auto-generates an initial review from the diff
+4. The host reads findings via `check_messages`, investigates, fixes or rebuts, and replies with `send_message`
+5. The review continues until the partner says `LGTM` or the session is ended
 
-### Code audit mode
-1. Claude reads the target files and calls `start_dialog` with the code and an audit prompt
-2. Codex performs a deep adversarial audit — architecture, correctness, edge cases, security, resource management
-3. Claude investigates findings, fixes valid issues, and pushes back on false positives
-4. Discussion continues until the audit is complete
+Session data is stored under `~/.claude/dialogs/`.
 
 ## Prerequisites
 
 - [Node.js](https://nodejs.org/) >= 18
-- [Codex CLI](https://github.com/openai/codex) installed and available on your PATH (or specify a custom command)
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) on your `PATH` if you want Claude-hosted commands or Claude as a review partner
+- [Codex CLI](https://github.com/openai/codex) on your `PATH` if you want Codex-hosted skills or Codex as a review partner
+
+For the full bidirectional install, both CLIs should be available.
 
 ## Install
 
@@ -46,14 +46,45 @@ cd claude-codex-dialog
 npm run setup
 ```
 
-This installs dependencies, registers the MCP server in your Claude Code settings, and installs the `/codex-review-code`, `/codex-review-plan`, `/codex-review-spec`, and `/codex-audit` slash commands globally.
+Default install mode is `--both`, which does all of the following:
 
-Restart Claude Code after installation to pick up the new MCP server.
+- registers the MCP server for Claude
+- installs Claude slash commands:
+  - `/codex-review-code`
+  - `/codex-review-plan`
+  - `/codex-review-spec`
+  - `/codex-audit`
+- installs Claude-only investigation hooks
+- registers the MCP server for Codex
+- installs Codex skills:
+  - `/claude-review-code`
+  - `/claude-review-plan`
+  - `/claude-review-spec`
+  - `/claude-audit`
+
+You can also install only one side:
+
+```bash
+./install.sh --claude
+./install.sh --codex
+./install.sh --both
+```
 
 To uninstall:
+
 ```bash
 npm run uninstall
 ```
+
+Or remove only one side:
+
+```bash
+./uninstall.sh --claude
+./uninstall.sh --codex
+./uninstall.sh --both
+```
+
+Restart the relevant CLI after installation or uninstall so it reloads MCP config and commands/skills.
 
 ## MCP Tools
 
@@ -61,87 +92,96 @@ npm run uninstall
 
 | Tool | Description |
 |------|-------------|
-| `start_dialog` | Start a new discussion session with Codex CLI |
+| `start_dialog` | Start a new dialog session with a configurable host/partner agent pair |
 
 ### Code Review
 
 | Tool | Description |
 |------|-------------|
-| `start_code_review` | Start a review session — Codex auto-generates an initial review from the git diff |
+| `start_code_review` | Start a review session where the configured partner auto-generates an initial review from a git diff |
 | `get_review_summary` | Get review metadata, structured findings, and approval status |
 
-### Shared (work with both dialog and review sessions)
+### Shared
 
 | Tool | Description |
 |------|-------------|
-| `send_message` | Send a message to Codex in an ongoing session |
-| `check_messages` | Read new messages from Codex (use a Monitor on the session's `conversation.jsonl` to wait for notifications; call this tool to fetch content) |
+| `send_message` | Send a message from the host agent into an ongoing session |
+| `check_messages` | Read new partner messages and current runner status |
 | `get_full_history` | Get the complete conversation history |
-| `check_partner_alive` | Check if the Codex runner process is still running |
-| `end_dialog` | End the session and get the final conversation |
+| `check_partner_alive` | Check whether the partner runner process is still running |
+| `end_dialog` | End the session and return the final conversation |
 | `list_sessions` | List all dialog and review sessions |
 
 ## Usage
 
-### Slash commands
+### In Claude Code
 
-After installation, four slash commands are available in Claude Code:
+After Claude-side install:
 
-```
-/codex-review-code                    Review uncommitted changes
-/codex-review-code staged             Review only staged changes
-/codex-review-code branch             Review current branch vs main
-/codex-review-code commit:<sha>       Review a specific commit
-/codex-review-code staged security    Review staged changes with security focus
-/codex-review-code uncommitted rounds:7   Review with a custom 7-round soft budget
-
-/codex-review-plan                    Review an auto-detected plan file
-/codex-review-plan path/to/plan.md    Review a specific plan file
-/codex-review-plan rounds:3           Review with a tighter 3-round budget
-
-/codex-review-spec                    Review an auto-detected spec file
-/codex-review-spec docs/specs/foo.md  Review a specific spec file
-/codex-review-spec rounds:3           Review with a tighter 3-round budget
-
-/codex-audit src/                     Audit all source files for bugs and issues
-/codex-audit src/auth.ts src/db.ts    Audit specific files
-/codex-audit src/api/ security        Audit with a security focus
-/codex-audit src/ rounds:8            Audit with a looser 8-round budget
+```text
+/codex-review-code
+/codex-review-code staged security
+/codex-review-plan path/to/plan.md
+/codex-review-spec docs/specs/foo.md
+/codex-audit src/
 ```
 
-### Natural language
+### In Codex
 
-You can also ask Claude directly:
+After Codex-side install:
 
-**Dialog:**
-> "Start a dialog with Codex about how to refactor the authentication module"
-
-**Code review:**
-> "Have Codex review my changes on this branch"
-
-Claude will use the MCP tools to manage the discussion automatically. Session data is stored in `~/.claude/dialogs/`.
+```text
+/claude-review-code
+/claude-review-code staged security
+/claude-review-plan path/to/plan.md
+/claude-review-spec docs/specs/foo.md
+/claude-audit src/
+```
 
 ## Configuration
 
-Both runners have sensible defaults. The review runner uses longer timeouts to account for both sides investigating code:
+Defaults preserve the original flow:
 
-| Setting | Dialog | Review |
-|---------|--------|--------|
-| Soft round budget (default) | 5 | 5 |
-| Hard round cap | soft + 5 | soft + 5 |
-| Codex timeout per invocation | 5 min | 10 min |
-| Idle timeout | 15 min | 30 min |
-| Poll interval | 3s | 5s |
+- `host_agent` defaults to `claude`
+- `partner_agent` defaults to `codex`
+- `partner_command` defaults based on `partner_agent`
 
-These can be adjusted in `src/dialog-runner.mjs` and `src/review-runner.mjs` respectively.
+To invert the flow, set:
 
-### Round budget
+- `host_agent: "codex"`
+- `partner_agent: "claude"`
 
-Each session has a **soft round budget** (default 5) that the runner injects into every Codex prompt. The purpose is to push Codex to deliver **complete feedback in each message** rather than drip-feeding findings across rounds — wording is explicit about "dump everything you found" and "thoroughness, not speed." If the conversation needs more, a **hard cap** of soft+5 still allows overflow without fabricating urgency; once hit, the runner refuses further Codex turns.
+Both `start_dialog` and `start_code_review` also accept:
 
-Every `check_messages`, `send_message`, and `check_partner_alive` response includes a `budget` object: `{ max_rounds, hard_cap, rounds_used, rounds_remaining, hard_rounds_remaining, past_soft_cap }` so Claude can track where it stands.
+- `partner_command`
+- `model`
+- `reasoning_effort`
+- `max_rounds`
 
-Override per-session with `max_rounds` in `start_dialog` / `start_code_review`, or via the `rounds:N` arg on any slash command.
+The server still accepts `codex_command` for backward compatibility, and also accepts `claude_command` when Claude is the configured partner.
+
+## Round budget
+
+Each session has a soft round budget, default `5`, with a hard cap of `soft + 5`.
+
+Every `check_messages`, `send_message`, and `check_partner_alive` response includes:
+
+```json
+{
+  "max_rounds": 5,
+  "hard_cap": 10,
+  "rounds_used": 2,
+  "rounds_remaining": 3,
+  "hard_rounds_remaining": 8,
+  "past_soft_cap": false
+}
+```
+
+The runners explicitly instruct the partner agent to deliver complete feedback each round instead of drip-feeding findings.
+
+## Hooks
+
+The investigation-enforcement hooks are installed only for Claude-hosted flows. They are intentionally not installed for Codex-hosted flows.
 
 ## License
 

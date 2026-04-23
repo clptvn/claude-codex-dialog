@@ -2,7 +2,7 @@
   "name": "claude-codex-dialog",
   "version": "1.0.0",
   "type": "module",
-  "description": "MCP server enabling back-and-forth discussions between Claude Code and Codex CLI",
+  "description": "Bidirectional MCP server enabling back-and-forth discussions between Claude Code and Codex CLI",
   "scripts": {
     "start": "node src/dialog-server.mjs",
     "setup": "./install.sh",

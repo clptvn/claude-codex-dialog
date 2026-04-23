@@ -3,6 +3,23 @@ import path from "path";
 
 export const DIALOGS_DIR = path.join(process.env.HOME, ".claude", "dialogs");
 fs.mkdirSync(DIALOGS_DIR, { recursive: true });
+export const KNOWN_AGENTS = ["claude", "codex"];
+
+export function normalizeAgent(agent, fallback = "codex") {
+  return KNOWN_AGENTS.includes(agent) ? agent : fallback;
+}
+
+export function getSessionHostAgent(status) {
+  return normalizeAgent(status?.host_agent, "claude");
+}
+
+export function getSessionPartnerAgent(status) {
+  return normalizeAgent(status?.partner_agent, "codex");
+}
+
+export function getAgentDisplayName(agent) {
+  return normalizeAgent(agent, "codex") === "claude" ? "Claude" : "Codex";
+}
 
 function resolveConvPath(sessionDir) {
   return sessionDir.includes("conversation.jsonl")

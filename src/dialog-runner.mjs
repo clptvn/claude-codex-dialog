@@ -1,56 +1,59 @@
 #!/usr/bin/env node
 /**
- * Dialog Runner - Background process that manages codex invocations
+ * Dialog Runner - Background process that manages partner CLI invocations
  *
- * Polls for new Claude messages. When one appears, invokes codex with the
- * full conversation history and writes the response back to the shared
- * conversation file. Handles timeouts, crashes, and graceful shutdown.
- *
- * Usage: node dialog-runner.mjs <session-dir> <project-path> [codex-command]
+ * Polls for new host-agent messages. When one appears, invokes the configured
+ * partner CLI with the full conversation history and writes the response back
+ * to the shared conversation file. Handles timeouts, crashes, and graceful
+ * shutdown.
  */
 
 import fs from "fs";
-import os from "os";
 import path from "path";
-import { spawn } from "child_process";
-import { readConversation, appendMessage, sleep } from "./shared.mjs";
+import {
+  appendMessage,
+  getAgentDisplayName,
+  normalizeAgent,
+  readConversation,
+  sleep,
+} from "./shared.mjs";
+import { runPartnerCommand } from "./partner-invocation.mjs";
 
 const sessionDir = process.argv[2];
 const projectPath = process.argv[3] || process.cwd();
-const codexCommand = process.argv[4] || "codex";
+const partnerCommand = process.argv[4] || "codex";
 const SOFT_CAP = parseInt(process.argv[5], 10) || 5;
 const HARD_CAP = SOFT_CAP + 5;
 const REASONING_EFFORT = process.argv[6] || null;
-const CODEX_MODEL = process.argv[7] || null;
-const VALID_EFFORTS = ["low", "medium", "high", "xhigh"];
+const PARTNER_MODEL = process.argv[7] || null;
+const HOST_AGENT = normalizeAgent(process.argv[8], "claude");
+const PARTNER_AGENT = normalizeAgent(process.argv[9], "codex");
 
-if (!sessionDir) {
+if (!sessionDir || HOST_AGENT === PARTNER_AGENT) {
   process.exit(1);
 }
 
+const HOST_DISPLAY = getAgentDisplayName(HOST_AGENT);
+const PARTNER_DISPLAY = getAgentDisplayName(PARTNER_AGENT);
 const PROBLEM_PATH = path.join(sessionDir, "problem.md");
 const END_SIGNAL_PATH = path.join(sessionDir, "end_signal");
-const PROCESSING_PATH = path.join(sessionDir, "codex_processing");
+const PROCESSING_PATH = path.join(sessionDir, "partner_processing");
 const ERROR_PATH = path.join(sessionDir, "last_error.txt");
 const LOG_PATH = path.join(sessionDir, "runner.log");
 
 const MAX_TURNS = HARD_CAP;
 const POLL_INTERVAL_MS = 3000;
-const CODEX_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes per invocation
-const MAX_IDLE_MS = 15 * 60 * 1000; // 15 min with no new claude msgs = exit
-const MAX_CONVERSATION_MESSAGES = 30; // truncate older messages in prompt
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
+const PARTNER_TIMEOUT_MS = 15 * 60 * 1000;
+const MAX_IDLE_MS = 15 * 60 * 1000;
+const MAX_CONVERSATION_MESSAGES = 30;
 
 function log(msg) {
   const ts = new Date().toISOString();
   fs.appendFileSync(LOG_PATH, `[${ts}] ${msg}\n`);
 }
 
-// ── Codex prompt builder ─────────────────────────────────────────────────────
-
-function buildRoundBudgetBlock(codexTurns, softCap, hardCap) {
-  const currentRound = codexTurns + 1;
+function buildRoundBudgetBlock(partnerTurns, softCap, hardCap) {
+  const currentRound = partnerTurns + 1;
   const remaining = Math.max(0, softCap - currentRound);
   const pastSoft = currentRound > softCap;
 
@@ -80,8 +83,7 @@ How to use the budget well:
   return block;
 }
 
-function buildCodexPrompt(problem, messages, codexTurns) {
-  // Keep conversation manageable - truncate old messages but keep first + recent
+function buildPartnerPrompt(problem, messages, partnerTurns) {
   let conversationMessages = messages;
   if (messages.length > MAX_CONVERSATION_MESSAGES) {
     const first = messages.slice(0, 2);
@@ -98,11 +100,11 @@ function buildCodexPrompt(problem, messages, codexTurns) {
     ];
   }
 
-  let prompt = `You are participating in a technical discussion with Claude Code (Anthropic's AI coding assistant) about a challenging problem. You are "Codex" in this conversation.
+  let prompt = `You are participating in a technical discussion with ${HOST_DISPLAY} about a challenging problem. You are "${PARTNER_DISPLAY}" in this conversation.
 
-Your goal is to collaboratively solve the problem by bringing your own independent analysis, ideas, and critical thinking. You and Claude are working TOGETHER - you should build on each other's ideas while also challenging weak reasoning.
+Your goal is to collaboratively solve the problem by bringing your own independent analysis, ideas, and critical thinking. You and ${HOST_DISPLAY} are working together, so build on strong reasoning and challenge weak reasoning.
 
-${buildRoundBudgetBlock(codexTurns, SOFT_CAP, HARD_CAP)}
+${buildRoundBudgetBlock(partnerTurns, SOFT_CAP, HARD_CAP)}
 
 ## Problem Description
 ${problem}
@@ -122,11 +124,11 @@ You can read any files in this directory to understand the code.
         continue;
       }
       const speaker =
-        msg.from === "claude"
-          ? "Claude"
+        msg.from === HOST_AGENT
+          ? HOST_DISPLAY
           : msg.from === "system"
             ? "System"
-            : "Codex (you)";
+            : `${PARTNER_DISPLAY} (you)`;
       prompt += `\n### ${speaker} [message #${msg.id}]:\n${msg.content}\n`;
     }
     prompt += `\n`;
@@ -135,10 +137,10 @@ You can read any files in this directory to understand the code.
   prompt += `## Your Task
 - Read the conversation above carefully and provide your next response.
 - Think deeply about the problem. Explore relevant code files before responding.
-- If Claude made a suggestion, evaluate it critically - point out flaws or improvements.
+- If ${HOST_DISPLAY} made a suggestion, evaluate it critically and point out flaws or improvements.
 - If you have a new idea, explain your reasoning step by step.
-- Propose concrete solutions: specific files, functions, line numbers, code changes.
-- If you agree with Claude's analysis, say so but ADD something new - a refinement, edge case, or next step.
+- Propose concrete solutions: specific files, functions, line numbers, code changes when relevant.
+- If you agree with ${HOST_DISPLAY}'s analysis, say so but add something new: a refinement, edge case, or next step.
 - Be direct and technical. No filler.
 - Respect the round budget above: deliver complete feedback this message; do not save material for later rounds.
 
@@ -152,161 +154,85 @@ Respond with ONLY your message (plus the REFERENCED_FILES line). Do NOT wrap it 
   return prompt;
 }
 
-// ── Codex invocation ─────────────────────────────────────────────────────────
-
-async function runCodex(prompt) {
-  return new Promise((resolve, reject) => {
-    // Write prompt to /tmp so codex can read it (sessionDir is outside codex's sandbox)
-    const promptPath = path.join(os.tmpdir(), `codex-dialog-${Date.now()}-${Math.random().toString(36).slice(2)}.md`);
-    fs.writeFileSync(promptPath, prompt);
-
-    // Tell codex to read the prompt file - keeps CLI arg short
-    const shortPrompt = `Read the discussion prompt file at ${promptPath} and follow its instructions. Respond with your analysis.`;
-
-    log(`Invoking ${codexCommand} (prompt: ${prompt.length} chars)`);
-
-    const args = ["exec", "--full-auto"];
-    if (CODEX_MODEL) {
-      args.push("--model", CODEX_MODEL);
-    }
-    if (REASONING_EFFORT && VALID_EFFORTS.includes(REASONING_EFFORT)) {
-      args.push("-c", `model_reasoning_effort=${REASONING_EFFORT}`);
-    }
-    args.push(shortPrompt);
-
-    const codex = spawn(codexCommand, args, {
-      cwd: projectPath,
-      stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env },
-    });
-
-    let stdout = "";
-    let stderr = "";
-    let timedOut = false;
-
-    const timer = setTimeout(() => {
-      timedOut = true;
-      log("Codex invocation timed out, killing process");
-      try {
-        codex.kill("SIGTERM");
-      } catch {}
-      // Force kill after 10s if still alive
-      setTimeout(() => {
-        try {
-          codex.kill("SIGKILL");
-        } catch {}
-      }, 10000);
-    }, CODEX_TIMEOUT_MS);
-
-    codex.stdout.on("data", (data) => {
-      stdout += data.toString();
-    });
-
-    codex.stderr.on("data", (data) => {
-      stderr += data.toString();
-    });
-
-    codex.on("close", (code) => {
-      clearTimeout(timer);
-      try {
-        fs.unlinkSync(promptPath);
-      } catch {}
-
-      if (timedOut) {
-        reject(new Error("Codex timed out after 15 minutes"));
-        return;
-      }
-
-      const response = stdout.trim();
-      if (response) {
-        resolve(response);
-      } else {
-        reject(
-          new Error(
-            `Codex exited with code ${code}, no stdout. stderr: ${stderr.slice(0, 500)}`
-          )
-        );
-      }
-    });
-
-    codex.on("error", (err) => {
-      clearTimeout(timer);
-      try {
-        fs.unlinkSync(promptPath);
-      } catch {}
-      reject(err);
-    });
-  });
-}
-
-// ── Main loop ────────────────────────────────────────────────────────────────
-
 async function main() {
   const problem = fs.readFileSync(PROBLEM_PATH, "utf-8");
 
   let lastProcessedId = 0;
-  let codexTurns = 0;
-  let lastClaudeMessageTime = Date.now();
+  let partnerTurns = 0;
+  let lastHostMessageTime = Date.now();
   let consecutiveErrors = 0;
   const MAX_CONSECUTIVE_ERRORS = 3;
 
   log("=== Dialog runner started ===");
   log(`Project: ${projectPath}`);
-  log(`Codex command: ${codexCommand}`);
+  log(`Host agent: ${HOST_DISPLAY}`);
+  log(`Partner agent: ${PARTNER_DISPLAY}`);
+  log(`Partner command: ${partnerCommand}`);
   log(`Soft cap: ${SOFT_CAP} rounds, hard cap: ${HARD_CAP} rounds`);
-  log(`Model: ${CODEX_MODEL || "default"}`);
-  log(`Reasoning effort: ${REASONING_EFFORT || "codex default"}`);
+  log(`Model: ${PARTNER_MODEL || "default"}`);
+  log(`Reasoning effort: ${REASONING_EFFORT || "partner default"}`);
   log(`Max idle: ${MAX_IDLE_MS / 1000}s`);
 
-  while (codexTurns < MAX_TURNS) {
-    // Check for end signal
+  while (partnerTurns < MAX_TURNS) {
     if (fs.existsSync(END_SIGNAL_PATH)) {
       log("End signal detected, shutting down gracefully");
       break;
     }
 
-    // Read current conversation
     const messages = readConversation(sessionDir);
-
-    // Find new messages from Claude that we haven't processed
-    const newClaudeMessages = messages.filter(
-      (m) => m.id > lastProcessedId && m.from === "claude"
+    const newHostMessages = messages.filter(
+      (m) => m.id > lastProcessedId && m.from === HOST_AGENT
     );
 
-    if (newClaudeMessages.length > 0) {
-      // Update tracking
-      lastClaudeMessageTime = Date.now();
-      lastProcessedId = messages.reduce((max, m) => typeof m.id === "number" && Number.isSafeInteger(m.id) && m.id > max ? m.id : max, 0);
-
-      log(
-        `New Claude message(s) detected (latest id: ${lastProcessedId}). Starting codex turn ${codexTurns + 1}...`
+    if (newHostMessages.length > 0) {
+      lastHostMessageTime = Date.now();
+      lastProcessedId = messages.reduce(
+        (max, m) =>
+          typeof m.id === "number" && Number.isSafeInteger(m.id) && m.id > max
+            ? m.id
+            : max,
+        0
       );
 
-      // Mark as processing
+      log(
+        `New ${HOST_DISPLAY} message(s) detected (latest id: ${lastProcessedId}). Starting ${PARTNER_DISPLAY} turn ${partnerTurns + 1}...`
+      );
+
       fs.writeFileSync(PROCESSING_PATH, new Date().toISOString());
-      // Clear any previous error
       try {
         fs.unlinkSync(ERROR_PATH);
       } catch {}
 
       try {
-        const prompt = buildCodexPrompt(problem, messages, codexTurns);
-        const response = await runCodex(prompt);
+        const prompt = buildPartnerPrompt(problem, messages, partnerTurns);
+        const response = await runPartnerCommand({
+          partnerAgent: PARTNER_AGENT,
+          partnerCommand,
+          prompt,
+          projectPath,
+          model: PARTNER_MODEL,
+          reasoningEffort: REASONING_EFFORT,
+          timeoutMs: PARTNER_TIMEOUT_MS,
+          log,
+          tempPrefix: `${PARTNER_AGENT}-dialog`,
+          responseInstruction: "Respond with your analysis.",
+        });
 
-        if (response) {
-          appendMessage(sessionDir, "codex", response);
-          codexTurns++;
-          consecutiveErrors = 0;
-          log(
-            `Codex turn ${codexTurns} complete (${response.length} chars). Waiting for Claude...`
-          );
-        } else {
-          throw new Error("Empty response from codex");
-        }
+        appendMessage(sessionDir, PARTNER_AGENT, response);
+        partnerTurns++;
+        consecutiveErrors = 0;
+        log(
+          `${PARTNER_DISPLAY} turn ${partnerTurns} complete (${response.length} chars). Waiting for ${HOST_DISPLAY}...`
+        );
       } catch (err) {
         consecutiveErrors++;
-        log(`Error on codex turn: ${err.message} (${consecutiveErrors}/${MAX_CONSECUTIVE_ERRORS})`);
-        fs.writeFileSync(ERROR_PATH, `${err.message}\n\nConsecutive errors: ${consecutiveErrors}`);
+        log(
+          `Error on ${PARTNER_DISPLAY} turn: ${err.message} (${consecutiveErrors}/${MAX_CONSECUTIVE_ERRORS})`
+        );
+        fs.writeFileSync(
+          ERROR_PATH,
+          `${err.message}\n\nConsecutive errors: ${consecutiveErrors}`
+        );
 
         if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
           log("Too many consecutive errors, shutting down");
@@ -319,13 +245,11 @@ async function main() {
         }
       }
 
-      // Remove processing flag
       try {
         fs.unlinkSync(PROCESSING_PATH);
       } catch {}
     } else {
-      // No new messages - check idle timeout
-      const idleMs = Date.now() - lastClaudeMessageTime;
+      const idleMs = Date.now() - lastHostMessageTime;
       if (idleMs > MAX_IDLE_MS) {
         log(`Idle timeout reached (${(idleMs / 1000).toFixed(0)}s). Shutting down.`);
         appendMessage(
@@ -340,16 +264,15 @@ async function main() {
     await sleep(POLL_INTERVAL_MS);
   }
 
-  if (codexTurns >= MAX_TURNS) {
+  if (partnerTurns >= MAX_TURNS) {
     log(`Hard cap (${HARD_CAP}) reached`);
     appendMessage(
       sessionDir,
       "system",
-      `Hard round cap (${HARD_CAP}) reached — soft budget was ${SOFT_CAP}. No further Codex turns will be invoked in this session. Summarize remaining findings and start a new dialog if more discussion is needed.`
+      `Hard round cap (${HARD_CAP}) reached — soft budget was ${SOFT_CAP}. No further ${PARTNER_DISPLAY} turns will be invoked in this session. Summarize remaining findings and start a new dialog if more discussion is needed.`
     );
   }
 
-  // Cleanup processing flag
   try {
     fs.unlinkSync(PROCESSING_PATH);
   } catch {}
