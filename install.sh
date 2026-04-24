@@ -135,6 +135,7 @@ install_claude_commands() {
     cp "$SCRIPT_DIR/src/hooks/mark-needs-investigation.mjs" "$CLAUDE_HOOKS_DIR/"
     cp "$SCRIPT_DIR/src/hooks/clear-investigation.mjs" "$CLAUDE_HOOKS_DIR/"
     cp "$SCRIPT_DIR/src/hooks/enforce-investigation.mjs" "$CLAUDE_HOOKS_DIR/"
+    cp "$SCRIPT_DIR/src/hooks/enforce-resolution.mjs" "$CLAUDE_HOOKS_DIR/"
     cp "$SCRIPT_DIR/src/hooks/require-lgtm-or-cap.mjs" "$CLAUDE_HOOKS_DIR/"
     rm -f \
         "$CLAUDE_HOOKS_DIR/mark-needs-investigation.sh" \
@@ -159,7 +160,10 @@ install_claude_commands() {
         const preEntries = [
           {
             matcher: 'mcp__codex-dialog__send_message',
-            hooks: [{ type: 'command', command: 'node ' + hooksDir + '/enforce-investigation.mjs' }]
+            hooks: [
+              { type: 'command', command: 'node ' + hooksDir + '/enforce-investigation.mjs' },
+              { type: 'command', command: 'node ' + hooksDir + '/enforce-resolution.mjs' }
+            ]
           },
           {
             matcher: 'mcp__codex-dialog__end_dialog',

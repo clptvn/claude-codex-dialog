@@ -1,6 +1,6 @@
 ---
 description: Have Codex review a feature/product spec via the codex-dialog MCP server
-argument-hint: [optional: path/to/spec.md] [optional: rounds:N] [optional: effort:low|medium|high|xhigh] [optional: model:gpt-5.4|gpt-5.3-codex|gpt-5.4-mini|gpt-5.3-codex-spark]
+argument-hint: [optional: path/to/spec.md] [optional: rounds:N] [optional: effort:low|medium|high|xhigh] [optional: model:gpt-5.5|gpt-5.4|gpt-5.3-codex|gpt-5.4-mini|gpt-5.3-codex-spark]
 allowed-tools: mcp__codex-dialog__start_dialog, mcp__codex-dialog__check_messages, mcp__codex-dialog__send_message, mcp__codex-dialog__get_full_history, mcp__codex-dialog__check_partner_alive, mcp__codex-dialog__end_dialog, mcp__codex-dialog__list_sessions, Bash, Read, Glob, Grep, Edit, Write, AskUserQuestion, LSP, Monitor
 ---
 
@@ -31,7 +31,7 @@ Review spec: $ARGUMENTS
 Parse $ARGUMENTS:
 - Any argument of the form `rounds:N` (integer) → parse as `max_rounds`.
 - Any argument of the form `effort:<level>` where level is one of `low`, `medium`, `high`, `xhigh` → parse as `reasoning_effort`. Otherwise DO NOT pass it — let Codex use its own configured default.
-- Any argument of the form `model:<name>` where name is one of `gpt-5.4`, `gpt-5.3-codex`, `gpt-5.4-mini`, `gpt-5.3-codex-spark` → parse as `model`. These are the ONLY valid model IDs — do not guess or abbreviate (e.g. `gpt-5.3` is NOT valid, use `gpt-5.3-codex`). Otherwise DO NOT pass it — let Codex use its default.
+- Any argument of the form `model:<name>` where name is one of `gpt-5.5`, `gpt-5.4`, `gpt-5.3-codex`, `gpt-5.4-mini`, `gpt-5.3-codex-spark` → parse as `model`. These are the ONLY valid model IDs — do not guess or abbreviate (e.g. `gpt-5.3` is NOT valid, use `gpt-5.3-codex`). Otherwise DO NOT pass it — let Codex use its default.
 - Remaining non-`rounds:*`/non-`effort:*`/non-`model:*` argument (if any) → treat as the spec path.
 
 **If a spec path is provided**, use it directly — skip auto-detection entirely, even if other spec files exist. This is the preferred path when you (Claude) just produced the spec yourself and already know where it is (e.g. after running the `product-manager` skill in the same session). Pass the path you wrote; don't re-discover it.
@@ -193,6 +193,12 @@ For each finding Codex raised:
 2. **Understand before reacting.** Before deciding whether a finding is valid, make sure you understand what Codex is actually claiming. Re-read the finding. Re-read the relevant spec section and code. Check surrounding context.
 3. Determine: AGREE / PARTIALLY AGREE / DISAGREE
 4. Provide evidence from the spec text, the codebase, or user-story logic (file paths, line numbers, snippets)
+
+**Resolve testable claims now.** If a finding can be proven with a local command, grep, SQL query, migration check, CLI command, or filesystem inspection, run it before responding. Do not say you will verify it later unless you include a specific, valid reason it cannot be resolved now.
+
+For each disputed or unresolved finding, include either:
+- `Evidence`: the file, command, query, or result you checked
+- `Cannot resolve now because`: the specific, valid reason it cannot be resolved now
 
 **If you're struggling with a finding:**
 - That's useful information — it may mean the finding has identified genuine ambiguity or tension in the spec.

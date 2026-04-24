@@ -24,6 +24,7 @@ let partnerAgent = "codex";
 let partnerDisplay = "Codex";
 let hardCap = 10;
 let runnerPid = null;
+let allowsApproveVerdict = false;
 
 // Read conversation
 const convPath = path.join(sessionDir, "conversation.jsonl");
@@ -53,10 +54,27 @@ if (fs.existsSync(statusPath)) {
   } catch {}
 }
 
+const problemPath = path.join(sessionDir, "problem.md");
+if (fs.existsSync(problemPath)) {
+  try {
+    const problem = fs.readFileSync(problemPath, "utf-8");
+    allowsApproveVerdict =
+      /^Implementation plan review\b/i.test(problem) ||
+      /^Feature spec review\b/i.test(problem) ||
+      /^##\s*Plan Review Request\b/im.test(problem) ||
+      /^##\s*Spec Review Request\b/im.test(problem);
+  } catch {}
+}
+
 const hasLgtm = messages.some(
   (m) => m.from === partnerAgent && /(?:^|\n)\s*LGTM\b/i.test(m.content)
 );
 if (hasLgtm) process.exit(0);
+
+const hasApprove = allowsApproveVerdict && messages.some(
+  (m) => m.from === partnerAgent && /(?:^|\n)\s*APPROVE\b/i.test(m.content)
+);
+if (hasApprove) process.exit(0);
 
 const partnerRounds = messages.filter((m) => m.from === partnerAgent).length;
 if (partnerRounds >= hardCap) process.exit(0);
@@ -72,9 +90,9 @@ if (runnerPid) {
 }
 
 process.stderr.write(
-  `BLOCKED: Cannot end this session yet. ${partnerDisplay} has not given LGTM and the hard cap (${hardCap}) has not been reached (${partnerRounds} rounds used).
+  `BLOCKED: Cannot end this session yet. ${partnerDisplay} has not given ${allowsApproveVerdict ? "LGTM or APPROVE" : "LGTM"} and the hard cap (${hardCap}) has not been reached (${partnerRounds} rounds used).
 
-Wait for ${partnerDisplay} to verify your fixes and give LGTM before closing the session.
+Wait for ${partnerDisplay} to verify your fixes and give ${allowsApproveVerdict ? "LGTM or APPROVE" : "LGTM"} before closing the session.
 If ${partnerDisplay} has remaining concerns, address them first.
 
 To force-close a stuck session, the runner must be dead or the hard cap must be hit.
