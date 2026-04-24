@@ -30,23 +30,33 @@ try {
 }
 
 const referencedFiles = response.referenced_files || [];
+const sessionId = payload.tool_input?.session_id;
+if (!sessionId || !/^[\w-]+$/.test(sessionId)) process.exit(0);
 
-// If Codex provided specific file references, always enforce them.
+let partnerAgent = "codex";
+try {
+  const statusPath = path.join(process.env.HOME, ".claude", "dialogs", sessionId, "status.json");
+  if (fs.existsSync(statusPath)) {
+    const status = JSON.parse(fs.readFileSync(statusPath, "utf-8"));
+    if (status?.partner_agent === "claude" || status?.partner_agent === "codex") {
+      partnerAgent = status.partner_agent;
+    }
+  }
+} catch {}
+
+// If the partner provided specific file references, always enforce them.
 // If no specific files but severity-tagged findings exist, use __any__ fallback.
 // If neither, nothing to enforce.
 // check_messages uses new_messages, get_full_history uses messages
 const msgs = response.new_messages || response.messages || [];
 const hasTaggedFindings = msgs.some(
   (m) =>
-    m.from === "codex" &&
+    m.from === partnerAgent &&
     /\[(CRITICAL|CORRECTNESS|ARCHITECTURE|SECURITY|ROBUSTNESS|SUGGESTION|QUESTION)\]/.test(
       m.content
     )
 );
 if (referencedFiles.length === 0 && !hasTaggedFindings) process.exit(0);
-
-const sessionId = payload.tool_input?.session_id;
-if (!sessionId || !/^[\w-]+$/.test(sessionId)) process.exit(0);
 
 const marker = path.join(os.tmpdir(), `codex-required-reads-${sessionId}`);
 

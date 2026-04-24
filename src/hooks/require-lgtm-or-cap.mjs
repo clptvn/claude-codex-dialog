@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // PreToolUse hook for mcp__codex-dialog__end_dialog
-// Blocks session closure unless Codex has given LGTM or the hard round cap is hit.
+// Blocks session closure unless the partner has given LGTM or the hard round cap is hit.
 
 import fs from "fs";
 import path from "path";
@@ -20,6 +20,11 @@ const dialogsDir = path.join(process.env.HOME, ".claude", "dialogs");
 const sessionDir = path.join(dialogsDir, sessionId);
 if (!fs.existsSync(sessionDir)) process.exit(0);
 
+let partnerAgent = "codex";
+let partnerDisplay = "Codex";
+let hardCap = 10;
+let runnerPid = null;
+
 // Read conversation
 const convPath = path.join(sessionDir, "conversation.jsonl");
 let messages = [];
@@ -33,34 +38,30 @@ if (fs.existsSync(convPath)) {
   }
 }
 
-// Check for LGTM from codex — require it at start of line (not preceded by
+// Check for LGTM from the partner — require it at start of line (not preceded by
 // negation like "Not LGTM" or "can't say LGTM")
-const hasLgtm = messages.some(
-  (m) => m.from === "codex" && /(?:^|\n)\s*LGTM\b/i.test(m.content)
-);
-if (hasLgtm) process.exit(0);
-
-// Check if hard cap reached
-let hardCap = 10;
 const statusPath = path.join(sessionDir, "status.json");
 if (fs.existsSync(statusPath)) {
   try {
     const status = JSON.parse(fs.readFileSync(statusPath, "utf-8"));
-    hardCap = status.hard_cap || (status.max_rounds || 5) + 5;
+    if (status?.partner_agent === "claude" || status?.partner_agent === "codex") {
+      partnerAgent = status.partner_agent;
+      partnerDisplay = partnerAgent === "claude" ? "Claude" : "Codex";
+    }
+    hardCap = status?.hard_cap || (status?.max_rounds || 5) + 5;
+    runnerPid = status?.runner_pid || null;
   } catch {}
 }
-const codexRounds = messages.filter((m) => m.from === "codex").length;
-if (codexRounds >= hardCap) process.exit(0);
+
+const hasLgtm = messages.some(
+  (m) => m.from === partnerAgent && /(?:^|\n)\s*LGTM\b/i.test(m.content)
+);
+if (hasLgtm) process.exit(0);
+
+const partnerRounds = messages.filter((m) => m.from === partnerAgent).length;
+if (partnerRounds >= hardCap) process.exit(0);
 
 // Check if runner is dead (allow closing dead sessions)
-const runnerPid = (() => {
-  try {
-    const status = JSON.parse(fs.readFileSync(statusPath, "utf-8"));
-    return status.runner_pid;
-  } catch {
-    return null;
-  }
-})();
 if (runnerPid) {
   try {
     process.kill(runnerPid, 0);
@@ -71,10 +72,10 @@ if (runnerPid) {
 }
 
 process.stderr.write(
-  `BLOCKED: Cannot end this session yet. Codex has not given LGTM and the hard cap (${hardCap}) has not been reached (${codexRounds} rounds used).
+  `BLOCKED: Cannot end this session yet. ${partnerDisplay} has not given LGTM and the hard cap (${hardCap}) has not been reached (${partnerRounds} rounds used).
 
-Wait for Codex to verify your fixes and give LGTM before closing the session.
-If Codex has remaining concerns, address them first.
+Wait for ${partnerDisplay} to verify your fixes and give LGTM before closing the session.
+If ${partnerDisplay} has remaining concerns, address them first.
 
 To force-close a stuck session, the runner must be dead or the hard cap must be hit.
 `

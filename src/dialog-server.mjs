@@ -60,6 +60,17 @@ function getProcessingPath(sessionDir) {
   return path.join(sessionDir, "codex_processing");
 }
 
+function writeFileAtomic(targetPath, content) {
+  const tmpPath = `${targetPath}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tmpPath, content);
+  try {
+    fs.renameSync(tmpPath, targetPath);
+  } catch (err) {
+    try { fs.unlinkSync(tmpPath); } catch {}
+    throw err;
+  }
+}
+
 function computeBudget(status, messages) {
   const maxRounds = status?.max_rounds ?? 5;
   const hardCap = status?.hard_cap ?? maxRounds + 5;
@@ -739,7 +750,21 @@ server.tool(
         const baseline = status.head_sha || "HEAD";
         let refreshedDiff;
         if (status.diff_target === "staged") {
-          refreshedDiff = execSync("git diff --cached", refreshOpts).toString();
+          let filesChanged = [];
+          try {
+            const meta = JSON.parse(
+              fs.readFileSync(path.join(sessionDir, "review_meta.json"), "utf-8")
+            );
+            filesChanged = Array.isArray(meta?.files_changed) ? meta.files_changed : [];
+          } catch {}
+
+          try {
+            refreshedDiff = filesChanged.length > 0
+              ? execFileSync("git", ["diff", baseline, "--", ...filesChanged], refreshOpts).toString()
+              : execFileSync("git", ["diff", baseline], refreshOpts).toString();
+          } catch {
+            refreshedDiff = execFileSync("git", ["diff", "HEAD"], refreshOpts).toString();
+          }
         } else if (status.diff_target === "branch") {
           const base = status.base_branch || "main";
           const head = status.branch;
@@ -753,10 +778,10 @@ server.tool(
           try {
             refreshedDiff = execFileSync("git", ["diff", baseline], refreshOpts).toString();
           } catch {
-            refreshedDiff = execSync("git diff", refreshOpts).toString();
+            refreshedDiff = execFileSync("git", ["diff"], refreshOpts).toString();
           }
         }
-        fs.writeFileSync(path.join(sessionDir, "diff_refreshed.patch"), refreshedDiff);
+        writeFileAtomic(path.join(sessionDir, "diff_refreshed.patch"), refreshedDiff);
       } catch {
         // On failure, remove stale refreshed diff so runner falls back to original
         try { fs.unlinkSync(path.join(sessionDir, "diff_refreshed.patch")); } catch {}
@@ -846,8 +871,12 @@ server.tool(
               partner_agent: partnerAgent,
               partner_runner_alive: runnerAlive,
               partner_currently_processing: partnerProcessing,
-              codex_runner_alive: runnerAlive,
-              codex_currently_processing: partnerProcessing,
+              ...(partnerAgent === "codex"
+                ? {
+                    codex_runner_alive: runnerAlive,
+                    codex_currently_processing: partnerProcessing,
+                  }
+                : {}),
               last_error: lastError,
               budget,
               referenced_files: referencedFiles,
@@ -965,8 +994,12 @@ server.tool(
               runner_pid: status?.runner_pid,
               partner_currently_processing: processing,
               seconds_since_last_partner_message: secondsSinceLastPartner,
-              codex_currently_processing: processing,
-              seconds_since_last_codex_message: secondsSinceLastPartner,
+              ...(partnerAgent === "codex"
+                ? {
+                    codex_currently_processing: processing,
+                    seconds_since_last_codex_message: secondsSinceLastPartner,
+                  }
+                : {}),
               last_error: lastError,
               started_at: status?.started_at,
               recent_log: logTail,
