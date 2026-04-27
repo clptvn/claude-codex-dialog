@@ -144,7 +144,7 @@ if [[ "$REMOVE_CLAUDE" -eq 1 ]]; then
 fi
 
 if [[ "$REMOVE_CODEX" -eq 1 ]]; then
-    for skill in claude-review-code claude-review-plan claude-review-spec claude-audit; do
+    for skill in claude-review-code claude-review-plan claude-review-spec claude-audit claude-ui-implementer; do
         if [[ -d "$CODEX_SKILLS_DIR/$skill" ]]; then
             rm -rf "$CODEX_SKILLS_DIR/$skill"
             echo "  Removed /$skill ✓"

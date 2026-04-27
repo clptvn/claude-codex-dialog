@@ -71,6 +71,20 @@ function writeFileAtomic(targetPath, content) {
   }
 }
 
+function resolveSubjectPath(subjectPath, projectPath) {
+  if (!subjectPath) return null;
+
+  const resolvedProjectPath = projectPath || process.cwd();
+  const resolvedPath = path.isAbsolute(subjectPath)
+    ? subjectPath
+    : path.resolve(resolvedProjectPath, subjectPath);
+  const stat = fs.statSync(resolvedPath);
+  if (!stat.isFile()) {
+    throw new Error(`Subject path is not a file: ${subjectPath}`);
+  }
+  return resolvedPath;
+}
+
 function computeBudget(status, messages) {
   const maxRounds = status?.max_rounds ?? 5;
   const hardCap = status?.hard_cap ?? maxRounds + 5;
@@ -145,7 +159,7 @@ function extractReferencedFiles(messages, projectPath, partnerAgent = "codex") {
 
 server.tool(
   "start_dialog",
-  "Start a new discussion session with a partner CLI. By default the host is Claude and the partner is Codex, but the session can be inverted so Codex hosts and Claude is the partner. Enforces a soft round budget (default 5) with a hard cap 5 rounds past that.",
+  "Start a new discussion session with a partner CLI. By default the host is Claude and the partner is Codex, but the session can be inverted so Codex hosts and Claude is the partner. Enforces a soft round budget (default 5) with a hard cap 5 rounds past that. Use subject_path for reviewed documents that should be reread each round, and tool_profile='implementation' only when the partner should edit files.",
   {
     problem_description: z
       .string()
@@ -193,6 +207,22 @@ server.tool(
       .string()
       .optional()
       .describe("Optional partner model override. Omit to use the partner CLI default."),
+    tool_profile: z
+      .enum(["read", "implementation"])
+      .optional()
+      .describe(
+        "Partner tool access profile. 'read' is the default for analysis/review; 'implementation' permits file editing for implementation collaboration."
+      ),
+    subject_path: z
+      .string()
+      .optional()
+      .describe(
+        "Optional path to a reviewed document, such as a plan or spec. The runner rereads this file before each partner turn and includes the current contents as authoritative context."
+      ),
+    subject_kind: z
+      .enum(["plan", "spec", "document"])
+      .optional()
+      .describe("Kind of reviewed document at subject_path. Used only for prompt labels."),
   },
   async ({
     problem_description,
@@ -205,6 +235,9 @@ server.tool(
     max_rounds,
     reasoning_effort,
     model,
+    tool_profile,
+    subject_path,
+    subject_kind,
   }) => {
     const hostAgent = normalizeAgent(host_agent, "claude");
     const partnerAgent = normalizeAgent(partner_agent, "codex");
@@ -231,6 +264,20 @@ server.tool(
       claude_command
     );
     const partnerDisplay = getAgentDisplayName(partnerAgent);
+    const resolvedProjectPath = project_path || process.cwd();
+    let subjectPath = null;
+    try {
+      subjectPath = resolveSubjectPath(subject_path, resolvedProjectPath);
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error: Could not read subject_path "${subject_path}": ${err.message}`,
+          },
+        ],
+      };
+    }
 
     // Write problem description
     fs.writeFileSync(path.join(sessionDir, "problem.md"), problem_description);
@@ -252,6 +299,9 @@ server.tool(
       hard_cap: hardCap,
       reasoning_effort: reasoning_effort || null,
       model: model || null,
+      tool_profile: tool_profile || "read",
+      subject_path: subjectPath,
+      subject_kind: subjectPath ? (subject_kind || "document") : null,
       runner_pid: null,
     };
     fs.writeFileSync(
@@ -271,6 +321,7 @@ server.tool(
       model || "",
       hostAgent,
       partnerAgent,
+      tool_profile || "read",
     ];
     const runner = spawn(
       "node",
@@ -307,8 +358,11 @@ server.tool(
               hard_cap: hardCap,
               reasoning_effort: reasoning_effort || "partner default",
               model: model || "default",
+              tool_profile: tool_profile || "read",
+              subject_path: subjectPath,
+              subject_kind: subjectPath ? (subject_kind || "document") : null,
               message:
-                `Dialog started with a soft budget of ${softCap} rounds (hard cap ${hardCap}), model: ${model || "default"}, reasoning effort: ${reasoning_effort || "partner default"}. Send your first message with send_message, then wait for ${partnerDisplay}.`,
+                `Dialog started with a soft budget of ${softCap} rounds (hard cap ${hardCap}), model: ${model || "default"}, reasoning effort: ${reasoning_effort || "partner default"}, tool profile: ${tool_profile || "read"}. Send your first message with send_message, then wait for ${partnerDisplay}.`,
             },
             null,
             2
@@ -892,7 +946,7 @@ server.tool(
 
 server.tool(
   "get_full_history",
-  "Get the complete conversation history including the original problem description or review diff.",
+  "Get the complete conversation history including the original problem description or review diff, plus the current reviewed subject when configured.",
   {
     session_id: z.string().describe("The session ID (dialog or review)"),
   },
@@ -918,6 +972,22 @@ server.tool(
     const problem = fs.existsSync(problemPath)
       ? fs.readFileSync(problemPath, "utf-8")
       : null;
+    let currentSubject = null;
+    if (status?.subject_path) {
+      try {
+        currentSubject = {
+          path: status.subject_path,
+          kind: status.subject_kind || "document",
+          content: fs.readFileSync(status.subject_path, "utf-8"),
+        };
+      } catch (err) {
+        currentSubject = {
+          path: status.subject_path,
+          kind: status.subject_kind || "document",
+          error: err.message,
+        };
+      }
+    }
     let meta = null;
     if (fs.existsSync(metaPath)) {
       try { meta = JSON.parse(fs.readFileSync(metaPath, "utf-8")); } catch {}
@@ -927,7 +997,7 @@ server.tool(
       content: [
         {
           type: "text",
-          text: JSON.stringify({ problem, review_meta: meta, messages, referenced_files: referencedFiles }, null, 2),
+          text: JSON.stringify({ problem, current_subject: currentSubject, review_meta: meta, messages, referenced_files: referencedFiles }, null, 2),
         },
       ],
     };

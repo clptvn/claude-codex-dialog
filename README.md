@@ -10,6 +10,7 @@ A bidirectional MCP server for [Claude Code](https://docs.anthropic.com/en/docs/
 - **Plan Review** — adversarial review of implementation plans before code is written
 - **Spec Review** — adversarial review of product/feature specs before planning or implementation
 - **Code Audit** — deep audits of existing files for bugs, architecture issues, robustness, and security
+- **UI implementation partnership** — Codex can delegate frontend/UI implementation to Claude Opus 4.7 while Codex owns backend/API/data integration
 - **Claude-only enforcement hooks** — optional guardrails on the Claude side; no equivalent Codex hooks are installed
 
 ## How it works
@@ -61,6 +62,7 @@ Default install mode is `--both`, which does all of the following:
   - `/claude-review-plan`
   - `/claude-review-spec`
   - `/claude-audit`
+  - `/claude-ui-implementer`
 
 You can also install only one side:
 
@@ -136,6 +138,7 @@ After Codex-side install:
 /claude-review-plan path/to/plan.md
 /claude-review-spec docs/specs/foo.md
 /claude-audit src/
+/claude-ui-implementer implement the settings billing UI
 ```
 
 ## Configuration
@@ -157,6 +160,12 @@ Both `start_dialog` and `start_code_review` also accept:
 - `model`
 - `reasoning_effort`
 - `max_rounds`
+
+`start_dialog` also accepts:
+
+- `tool_profile`: `read` by default. Use `implementation` only when the partner should edit files, such as the `/claude-ui-implementer` Codex skill.
+- `subject_path`: optional path to a reviewed document, such as a plan or spec. The dialog runner rereads this file before every partner turn and includes the current contents as authoritative context.
+- `subject_kind`: optional label for `subject_path`: `plan`, `spec`, or `document`.
 
 The server still accepts `codex_command` for backward compatibility, and also accepts `claude_command` when Claude is the configured partner.
 

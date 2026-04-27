@@ -6,6 +6,14 @@ import { getAgentDisplayName, normalizeAgent } from "./shared.mjs";
 
 const VALID_CODEX_EFFORTS = new Set(["low", "medium", "high", "xhigh"]);
 const VALID_CLAUDE_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
+const VALID_TOOL_PROFILES = new Set(["read", "implementation"]);
+const CLAUDE_READ_TOOLS = "Read,Grep,Glob,Bash,LSP";
+const CLAUDE_IMPLEMENTATION_TOOLS =
+  "Read,Grep,Glob,Bash,LSP,Edit,MultiEdit,Write";
+
+function normalizeToolProfile(toolProfile) {
+  return VALID_TOOL_PROFILES.has(toolProfile) ? toolProfile : "read";
+}
 
 function buildInvocation({
   partnerAgent,
@@ -14,20 +22,26 @@ function buildInvocation({
   projectPath,
   model,
   reasoningEffort,
+  toolProfile,
   responseInstruction,
 }) {
   const normalizedAgent = normalizeAgent(partnerAgent, "codex");
+  const normalizedToolProfile = normalizeToolProfile(toolProfile);
   const instruction =
     responseInstruction || "Respond with your analysis.";
   const shortPrompt = `Read the prompt file at ${promptPath} and follow its instructions. ${instruction}`;
 
   if (normalizedAgent === "claude") {
+    const allowedTools =
+      normalizedToolProfile === "implementation"
+        ? CLAUDE_IMPLEMENTATION_TOOLS
+        : CLAUDE_READ_TOOLS;
     const args = [
       "-p",
       "--permission-mode",
       "bypassPermissions",
       "--allowedTools",
-      "Read,Grep,Glob,Bash,LSP",
+      allowedTools,
       "--add-dir",
       projectPath,
     ];
@@ -61,6 +75,7 @@ export async function runPartnerCommand({
   projectPath,
   model,
   reasoningEffort,
+  toolProfile,
   timeoutMs,
   log,
   tempPrefix,
@@ -85,11 +100,12 @@ export async function runPartnerCommand({
       projectPath,
       model,
       reasoningEffort,
+      toolProfile,
       responseInstruction,
     });
 
     log(
-      `Invoking ${partnerDisplay} via "${command}" (prompt: ${prompt.length} chars)`
+      `Invoking ${partnerDisplay} via "${command}" (prompt: ${prompt.length} chars, tool profile: ${normalizeToolProfile(toolProfile)})`
     );
 
     const child = spawn(command, args, {

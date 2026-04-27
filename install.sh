@@ -246,7 +246,7 @@ install_codex_skills() {
 
     mkdir -p "$CODEX_SKILLS_DIR"
 
-    for skill in claude-review-code claude-review-plan claude-review-spec claude-audit; do
+    for skill in claude-review-code claude-review-plan claude-review-spec claude-audit claude-ui-implementer; do
         rm -rf "$CODEX_SKILLS_DIR/$skill"
         cp -R "$SCRIPT_DIR/codex-skills/$skill" "$CODEX_SKILLS_DIR/$skill"
         echo "  /$skill ✓"
@@ -292,7 +292,7 @@ if [[ "$INSTALL_CLAUDE" -eq 1 ]]; then
     echo " Hooks:      $CLAUDE_HOOKS_DIR/"
 fi
 if [[ "$INSTALL_CODEX" -eq 1 ]]; then
-    echo " Codex:      $CODEX_SKILLS_DIR/{claude-review-code,claude-review-plan,claude-review-spec,claude-audit}"
+    echo " Codex:      $CODEX_SKILLS_DIR/{claude-review-code,claude-review-plan,claude-review-spec,claude-audit,claude-ui-implementer}"
 fi
 echo ""
 if [[ "$INSTALL_CLAUDE" -eq 1 ]]; then
@@ -314,5 +314,6 @@ if [[ "$INSTALL_CODEX" -eq 1 ]]; then
     echo "   /claude-review-plan         Review an implementation plan with Claude"
     echo "   /claude-review-spec         Review a product/feature spec with Claude"
     echo "   /claude-audit src/          Audit files with Claude"
+    echo "   /claude-ui-implementer      Collaborate with Claude Opus 4.7 on frontend/UI work"
 fi
 echo ""

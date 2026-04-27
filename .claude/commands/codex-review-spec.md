@@ -53,9 +53,9 @@ ls -t "$PROJECT_DIR"/spec*.md "$PROJECT_DIR"/SPEC.md 2>/dev/null | head -5
 
 If multiple candidates surface, use **AskUserQuestion** to disambiguate — never silently pick. If no spec found, use **AskUserQuestion** to ask the user for the path.
 
-### Step 0.2: Read the Spec
+### Step 0.2: Verify the Spec
 
-Read the spec file contents. You'll include this in the dialog prompt.
+Verify the spec file exists, is readable, is non-empty, and is markdown. The dialog server will reread this file before every Codex turn and inject the current contents as the authoritative spec snapshot.
 
 **Guard against unusable spec files.** Before proceeding to Phase 1:
 - If the file does not exist or the read returns empty content → abort with a clear message and do **not** call `start_dialog`. Starting a dialog with an empty spec wastes a session.
@@ -72,9 +72,11 @@ Call `start_dialog` with:
 - `max_rounds`: only if the user provided `rounds:N`. Otherwise OMIT this parameter and let the server default to 5. **Never invent or change this value on your own** — the 5-round default is tuned to force Codex to deliver complete feedback each round rather than drip-feed it.
 - `reasoning_effort`: only if the user provided `effort:<level>`. Otherwise omit the parameter entirely and let Codex use its own configured default.
 - `model`: only if the user provided `model:<id>`. Otherwise omit the parameter entirely and let Codex use its default.
+- `subject_path`: the resolved spec file path
+- `subject_kind`: `"spec"`
 - `problem_description`: a structured prompt — see below
 
-The `problem_description` must include the full spec content AND the adversarial review instructions:
+The `problem_description` must include the adversarial review instructions. Do not rely on this field as the canonical spec copy — `subject_path` makes the server inject the current spec file each round:
 
 ```
 ## Spec Review Request
@@ -122,11 +124,9 @@ Examine the spec for:
 
 You have access to the full project codebase at the project_path. Read relevant files to verify assumptions the spec makes about existing code or product structure.
 
-### The Spec
+### Current Spec Source
 
-<spec>
-[FULL SPEC CONTENT HERE]
-</spec>
+The server will include a `Current Spec Snapshot` section in each Codex prompt by rereading the spec file from `subject_path`. Treat that snapshot as the authoritative current spec. It supersedes older spec text or summaries in the conversation.
 
 ### Response Format
 
@@ -150,7 +150,7 @@ At the end, give an overall verdict:
 
 Save the returned `session_id`.
 
-Then use `send_message` to send the spec review prompt as your first message to kick off the dialog.
+Then use `send_message` to ask Codex to review the current spec snapshot as your first message to kick off the dialog.
 
 ---
 

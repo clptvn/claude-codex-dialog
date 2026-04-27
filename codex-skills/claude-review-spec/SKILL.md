@@ -27,7 +27,7 @@ If a spec path is not provided, auto-detect from:
 If multiple candidates exist, ask the user which one to review.
 If none exist, ask the user for the path.
 
-Read the spec file before continuing.
+Verify the spec file exists, is readable, is non-empty, and is markdown before continuing.
 Abort if the file is empty or is not markdown.
 
 ## Start the dialog
@@ -40,6 +40,8 @@ Determine the git root and call `mcp__codex-dialog__start_dialog` with:
 - `max_rounds` only if explicitly requested
 - `reasoning_effort` only if explicitly requested
 - `model` only if explicitly requested
+- `subject_path`: the resolved spec file path
+- `subject_kind`: `"spec"`
 - `problem_description`: a short summary such as `Feature spec review for <path>. Claude Code will adversarially review ambiguity, gaps, and testability.`
 
 Save the returned `session_id`.
@@ -84,9 +86,7 @@ At the end, give one verdict:
 - NEEDS_DISCUSSION
 - MAJOR_CONCERNS
 
-<spec>
-[FULL SPEC CONTENT]
-</spec>
+The server will include a `Current Spec Snapshot` section by rereading the spec file from `subject_path` before every Claude turn. Treat that snapshot as the authoritative current spec.
 ```
 
 ## Wait for Claude

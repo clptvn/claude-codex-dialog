@@ -51,9 +51,9 @@ ls -t "$PROJECT_DIR"/plan*.md "$PROJECT_DIR"/PLAN.md "$PROJECT_DIR"/.claude/plan
 
 If no plan found, use **AskUserQuestion** to ask the user for the path.
 
-### Step 0.2: Read the Plan
+### Step 0.2: Verify the Plan
 
-Read the plan file contents. You'll include this in the dialog prompt.
+Verify the plan file exists, is readable, and is non-empty. The dialog server will reread this file before every Codex turn and inject the current contents as the authoritative plan snapshot.
 
 ---
 
@@ -64,9 +64,11 @@ Call `start_dialog` with:
 - `max_rounds`: only if the user provided `rounds:N`. Otherwise OMIT this parameter and let the server default to 5. **Never invent or change this value on your own** — the 5-round default is tuned to force Codex to deliver complete feedback each round rather than drip-feed it.
 - `reasoning_effort`: only if the user provided `effort:<level>`. Otherwise omit the parameter entirely and let Codex use its own configured default.
 - `model`: only if the user provided `model:<id>`. Otherwise omit the parameter entirely and let Codex use its default.
+- `subject_path`: the resolved plan file path
+- `subject_kind`: `"plan"`
 - `problem_description`: a structured prompt — see below
 
-The `problem_description` must include the full plan content AND the adversarial review instructions:
+The `problem_description` must include the adversarial review instructions. Do not rely on this field as the canonical plan copy — `subject_path` makes the server inject the current plan file each round:
 
 ```
 ## Plan Review Request
@@ -110,11 +112,9 @@ Examine the plan for:
 
 You have access to the full project codebase at the project_path. Read relevant files to verify assumptions made in the plan.
 
-### The Plan
+### Current Plan Source
 
-<plan>
-[FULL PLAN CONTENT HERE]
-</plan>
+The server will include a `Current Plan Snapshot` section in each Codex prompt by rereading the plan file from `subject_path`. Treat that snapshot as the authoritative current plan. It supersedes older plan text or summaries in the conversation.
 
 ### Response Format
 
@@ -133,7 +133,7 @@ At the end, give an overall verdict:
 
 Save the returned `session_id`.
 
-Then use `send_message` to send the plan review prompt as your first message to kick off the dialog.
+Then use `send_message` to ask Codex to review the current plan snapshot as your first message to kick off the dialog.
 
 ---
 

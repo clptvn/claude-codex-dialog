@@ -28,6 +28,7 @@ const REASONING_EFFORT = process.argv[6] || null;
 const PARTNER_MODEL = process.argv[7] || null;
 const HOST_AGENT = normalizeAgent(process.argv[8], "claude");
 const PARTNER_AGENT = normalizeAgent(process.argv[9], "codex");
+const TOOL_PROFILE = process.argv[10] === "implementation" ? "implementation" : "read";
 
 if (!sessionDir || HOST_AGENT === PARTNER_AGENT) {
   process.exit(1);
@@ -36,6 +37,7 @@ if (!sessionDir || HOST_AGENT === PARTNER_AGENT) {
 const HOST_DISPLAY = getAgentDisplayName(HOST_AGENT);
 const PARTNER_DISPLAY = getAgentDisplayName(PARTNER_AGENT);
 const PROBLEM_PATH = path.join(sessionDir, "problem.md");
+const STATUS_PATH = path.join(sessionDir, "status.json");
 const END_SIGNAL_PATH = path.join(sessionDir, "end_signal");
 const PROCESSING_PATH = path.join(sessionDir, "partner_processing");
 const ERROR_PATH = path.join(sessionDir, "last_error.txt");
@@ -50,6 +52,59 @@ const MAX_CONVERSATION_MESSAGES = 30;
 function log(msg) {
   const ts = new Date().toISOString();
   fs.appendFileSync(LOG_PATH, `[${ts}] ${msg}\n`);
+}
+
+function readSessionStatus() {
+  if (!fs.existsSync(STATUS_PATH)) return {};
+  try {
+    return JSON.parse(fs.readFileSync(STATUS_PATH, "utf-8"));
+  } catch {
+    return {};
+  }
+}
+
+function displaySubjectKind(kind) {
+  if (kind === "plan") return "Plan";
+  if (kind === "spec") return "Spec";
+  return "Document";
+}
+
+function displaySubjectPath(subjectPath) {
+  if (!subjectPath) return "";
+  const rel = path.relative(projectPath, subjectPath);
+  if (!rel.startsWith("..") && !path.isAbsolute(rel)) return rel || ".";
+  return subjectPath;
+}
+
+function buildCurrentSubjectBlock(status) {
+  const subjectPath = status?.subject_path;
+  if (!subjectPath) return "";
+
+  const subjectKind = displaySubjectKind(status.subject_kind);
+  const subjectLabel = subjectKind.toLowerCase();
+  const pathLabel = displaySubjectPath(subjectPath);
+  try {
+    const content = fs.readFileSync(subjectPath, "utf-8");
+    return `## Current ${subjectKind} Snapshot
+
+Path: ${pathLabel}
+
+This is the authoritative current ${subjectLabel}. It supersedes any older copy or summary of the ${subjectLabel} in the original problem description or conversation history. Re-review this current ${subjectLabel} each round after ${HOST_DISPLAY} says they updated it.
+
+<current_${subjectLabel}>
+${content}
+</current_${subjectLabel}>
+
+`;
+  } catch (err) {
+    return `## Current ${subjectKind} Snapshot
+
+Path: ${pathLabel}
+
+Could not read the current ${subjectLabel} from disk: ${err.message}
+
+`;
+  }
 }
 
 function buildRoundBudgetBlock(partnerTurns, softCap, hardCap) {
@@ -83,7 +138,7 @@ How to use the budget well:
   return block;
 }
 
-function buildPartnerPrompt(problem, messages, partnerTurns) {
+function buildPartnerPrompt(problem, messages, partnerTurns, status) {
   let conversationMessages = messages;
   if (messages.length > MAX_CONVERSATION_MESSAGES) {
     const first = messages.slice(0, 2);
@@ -109,10 +164,18 @@ ${buildRoundBudgetBlock(partnerTurns, SOFT_CAP, HARD_CAP)}
 ## Problem Description
 ${problem}
 
+${buildCurrentSubjectBlock(status)}
 ## Project Directory
 ${projectPath}
 
 You can read any files in this directory to understand the code.
+
+${TOOL_PROFILE === "implementation" ? `## Implementation Authority
+You may edit files in the project directory. Treat ${HOST_DISPLAY} as the backend/integration owner and yourself as the frontend/UI owner unless the conversation says otherwise.
+
+Keep changes scoped to your assigned frontend/UI work. Do not rewrite backend, database, auth, billing, or infrastructure code unless ${HOST_DISPLAY} explicitly asks you to touch a narrow integration point. When you change files, summarize exactly what changed and list the paths.
+
+` : ""}
 
 `;
 
@@ -156,6 +219,7 @@ Respond with ONLY your message (plus the REFERENCED_FILES line). Do NOT wrap it 
 
 async function main() {
   const problem = fs.readFileSync(PROBLEM_PATH, "utf-8");
+  const status = readSessionStatus();
 
   let lastProcessedId = 0;
   let partnerTurns = 0;
@@ -171,6 +235,10 @@ async function main() {
   log(`Soft cap: ${SOFT_CAP} rounds, hard cap: ${HARD_CAP} rounds`);
   log(`Model: ${PARTNER_MODEL || "default"}`);
   log(`Reasoning effort: ${REASONING_EFFORT || "partner default"}`);
+  log(`Tool profile: ${TOOL_PROFILE}`);
+  if (status.subject_path) {
+    log(`Subject: ${status.subject_kind || "document"} at ${status.subject_path}`);
+  }
   log(`Max idle: ${MAX_IDLE_MS / 1000}s`);
 
   while (partnerTurns < MAX_TURNS) {
@@ -204,7 +272,7 @@ async function main() {
       } catch {}
 
       try {
-        const prompt = buildPartnerPrompt(problem, messages, partnerTurns);
+        const prompt = buildPartnerPrompt(problem, messages, partnerTurns, status);
         const response = await runPartnerCommand({
           partnerAgent: PARTNER_AGENT,
           partnerCommand,
@@ -212,6 +280,7 @@ async function main() {
           projectPath,
           model: PARTNER_MODEL,
           reasoningEffort: REASONING_EFFORT,
+          toolProfile: TOOL_PROFILE,
           timeoutMs: PARTNER_TIMEOUT_MS,
           log,
           tempPrefix: `${PARTNER_AGENT}-dialog`,

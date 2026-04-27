@@ -26,7 +26,7 @@ If a plan path is not provided, auto-detect from:
 If multiple candidates exist, ask the user which one to review.
 If none exist, ask the user for the path.
 
-Read the plan file before starting the dialog.
+Verify the plan file exists, is readable, and is non-empty before starting the dialog.
 
 ## Start the dialog
 
@@ -38,6 +38,8 @@ Determine the git root and call `mcp__codex-dialog__start_dialog` with:
 - `max_rounds` only if explicitly requested
 - `reasoning_effort` only if explicitly requested
 - `model` only if explicitly requested
+- `subject_path`: the resolved plan file path
+- `subject_kind`: `"plan"`
 - `problem_description`: a short summary such as `Implementation plan review for <path>. Claude Code will adversarially review feasibility, ordering, and completeness.`
 
 Save the returned `session_id`.
@@ -73,9 +75,7 @@ At the end, give one verdict:
 - NEEDS_DISCUSSION
 - MAJOR_CONCERNS
 
-<plan>
-[FULL PLAN CONTENT]
-</plan>
+The server will include a `Current Plan Snapshot` section by rereading the plan file from `subject_path` before every Claude turn. Treat that snapshot as the authoritative current plan.
 ```
 
 ## Wait for Claude
