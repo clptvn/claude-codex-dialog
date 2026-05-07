@@ -5,6 +5,7 @@ import fs from "fs";
 import path from "path";
 import { spawn, execSync, execFileSync } from "child_process";
 import crypto from "crypto";
+import { fileURLToPath } from "url";
 import {
   DIALOGS_DIR,
   getAgentDisplayName,
@@ -310,7 +311,7 @@ server.tool(
     );
 
     // Spawn the dialog runner in background
-    const runnerPath = new URL("dialog-runner.mjs", import.meta.url).pathname;
+    const runnerPath = fileURLToPath(new URL("dialog-runner.mjs", import.meta.url));
     const runnerArgs = [
       runnerPath,
       sessionDir,
@@ -324,12 +325,13 @@ server.tool(
       tool_profile || "read",
     ];
     const runner = spawn(
-      "node",
+      process.execPath,
       runnerArgs,
       {
         detached: true,
         stdio: ["ignore", "ignore", "ignore"],
         env: { ...process.env },
+        windowsHide: true,
       }
     );
     runner.on("error", () => {});
@@ -637,7 +639,7 @@ server.tool(
     );
 
     // Spawn the review runner
-    const runnerPath = new URL("review-runner.mjs", import.meta.url).pathname;
+    const runnerPath = fileURLToPath(new URL("review-runner.mjs", import.meta.url));
     const reviewRunnerArgs = [
       runnerPath,
       sessionDir,
@@ -650,12 +652,13 @@ server.tool(
       partnerAgent,
     ];
     const runner = spawn(
-      "node",
+      process.execPath,
       reviewRunnerArgs,
       {
         detached: true,
         stdio: ["ignore", "ignore", "ignore"],
         env: { ...process.env },
+        windowsHide: true,
       }
     );
     runner.on("error", () => {});

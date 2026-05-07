@@ -6,8 +6,9 @@
 import fs from "fs";
 import path from "path";
 import os from "os";
+import { readStdin } from "../platform.mjs";
 
-const input = fs.readFileSync("/dev/stdin", "utf-8");
+const input = readStdin();
 let payload;
 try {
   payload = JSON.parse(input);

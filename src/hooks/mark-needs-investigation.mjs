@@ -6,8 +6,9 @@
 import fs from "fs";
 import path from "path";
 import os from "os";
+import { dialogSessionDir, readStdin } from "../platform.mjs";
 
-const input = fs.readFileSync("/dev/stdin", "utf-8");
+const input = readStdin();
 let payload;
 try {
   payload = JSON.parse(input);
@@ -35,7 +36,7 @@ if (!sessionId || !/^[\w-]+$/.test(sessionId)) process.exit(0);
 
 let partnerAgent = "codex";
 try {
-  const statusPath = path.join(process.env.HOME, ".claude", "dialogs", sessionId, "status.json");
+  const statusPath = path.join(dialogSessionDir(sessionId), "status.json");
   if (fs.existsSync(statusPath)) {
     const status = JSON.parse(fs.readFileSync(statusPath, "utf-8"));
     if (status?.partner_agent === "claude" || status?.partner_agent === "codex") {

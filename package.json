@@ -5,11 +5,12 @@
   "description": "Bidirectional MCP server enabling back-and-forth discussions between Claude Code and Codex CLI",
   "scripts": {
     "start": "node src/dialog-server.mjs",
-    "setup": "./install.sh",
-    "uninstall": "./uninstall.sh"
+    "setup": "node scripts/install.mjs",
+    "uninstall": "node scripts/uninstall.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
+    "cross-spawn": "^7.0.6",
     "zod": "^3.24.0"
   }
 }

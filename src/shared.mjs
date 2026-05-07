@@ -1,7 +1,8 @@
 import fs from "fs";
 import path from "path";
+import { dialogsDir } from "./platform.mjs";
 
-export const DIALOGS_DIR = path.join(process.env.HOME, ".claude", "dialogs");
+export const DIALOGS_DIR = dialogsDir();
 fs.mkdirSync(DIALOGS_DIR, { recursive: true });
 export const KNOWN_AGENTS = ["claude", "codex"];
 

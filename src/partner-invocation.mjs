@@ -1,7 +1,7 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { spawn } from "child_process";
+import spawn from "cross-spawn";
 import { getAgentDisplayName, normalizeAgent } from "./shared.mjs";
 
 const VALID_CODEX_EFFORTS = new Set(["low", "medium", "high", "xhigh"]);
@@ -57,7 +57,7 @@ function buildInvocation({
     return { command: partnerCommand, args };
   }
 
-  const args = ["exec", "--full-auto"];
+  const args = ["exec", "--sandbox", "workspace-write"];
   if (model) {
     args.push("--model", model);
   }
@@ -112,6 +112,7 @@ export async function runPartnerCommand({
       cwd: projectPath,
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env },
+      windowsHide: true,
     });
 
     let stdout = "";

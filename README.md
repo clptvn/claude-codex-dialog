@@ -39,7 +39,11 @@ Session data is stored under `~/.claude/dialogs/`.
 
 For the full bidirectional install, both CLIs should be available.
 
+Native Windows, macOS/Linux, and WSL are supported. On Windows, PowerShell may block npm's `.ps1` shims under the current execution policy; the server and installer use Windows-compatible command resolution so the npm `.cmd` shims still work.
+
 ## Install
+
+macOS, Linux, WSL, Git Bash, or Windows PowerShell:
 
 ```bash
 git clone https://github.com/clptvn/claude-codex-dialog.git
@@ -67,9 +71,25 @@ Default install mode is `--both`, which does all of the following:
 You can also install only one side:
 
 ```bash
+npm run setup -- --claude
+npm run setup -- --codex
+npm run setup -- --both
+```
+
+POSIX shell wrappers are still available:
+
+```bash
 ./install.sh --claude
 ./install.sh --codex
 ./install.sh --both
+```
+
+PowerShell wrappers are also available:
+
+```powershell
+.\install.ps1 -Claude
+.\install.ps1 -Codex
+.\install.ps1 -Both
 ```
 
 To uninstall:
@@ -84,6 +104,14 @@ Or remove only one side:
 ./uninstall.sh --claude
 ./uninstall.sh --codex
 ./uninstall.sh --both
+```
+
+Or in PowerShell:
+
+```powershell
+.\uninstall.ps1 -Claude
+.\uninstall.ps1 -Codex
+.\uninstall.ps1 -Both
 ```
 
 Restart the relevant CLI after installation or uninstall so it reloads MCP config and commands/skills.
