@@ -75,6 +75,17 @@ function modeLabel({ installClaude, installCodex }) {
   return "Codex only";
 }
 
+function plannedStepCount({ installClaude, installCodex }) {
+  return 3 + (installClaude ? 2 : 0) + (installCodex ? 2 : 0);
+}
+
+function createStepLogger(totalSteps) {
+  let currentStep = 1;
+  return (label) => {
+    console.log(`[${currentStep++}/${totalSteps}] ${label}`);
+  };
+}
+
 function checkNode() {
   const major = Number(process.versions.node.split(".")[0]);
   if (!Number.isFinite(major) || major < 18) {
@@ -124,6 +135,16 @@ function cliExists(spawn, command) {
     windowsHide: true,
   });
   return result.status === 0;
+}
+
+function checkPartnerClis(spawn, logStep) {
+  console.log("");
+  logStep("Checking partner CLIs...");
+  const hasClaude = cliExists(spawn, "claude");
+  const hasCodex = cliExists(spawn, "codex");
+  console.log(hasClaude ? "  Claude Code CLI OK" : "  WARNING: Claude Code CLI not found on PATH.");
+  console.log(hasCodex ? "  Codex CLI OK" : "  WARNING: Codex CLI not found on PATH.");
+  return { hasClaude, hasCodex };
 }
 
 function runCli(spawn, command, args, { allowFailure = false } = {}) {
@@ -181,9 +202,9 @@ function installHookFile(fileName) {
   fs.writeFileSync(targetPath, content);
 }
 
-function registerClaudeMcp(spawn, hasClaude) {
+function registerClaudeMcp(spawn, hasClaude, logStep) {
   console.log("");
-  console.log("[3/6] Registering MCP server for Claude...");
+  logStep("Registering MCP server for Claude...");
 
   if (hasClaude) {
     runCli(spawn, "claude", ["mcp", "remove", "codex-dialog", "-s", "user"], {
@@ -213,9 +234,9 @@ function registerClaudeMcp(spawn, hasClaude) {
   console.log("  MCP server written to ~/.claude.json (CLI fallback) OK");
 }
 
-function installClaudeCommandsAndHooks() {
+function installClaudeCommandsAndHooks(logStep) {
   console.log("");
-  console.log("[4/6] Installing Claude commands and hooks...");
+  logStep("Installing Claude commands and hooks...");
 
   fs.mkdirSync(CLAUDE_COMMANDS_DIR, { recursive: true });
   for (const command of CLAUDE_COMMANDS) {
@@ -315,9 +336,9 @@ function removeCodexMcpSection(content) {
     .trimEnd();
 }
 
-function registerCodexMcp(spawn, hasCodex) {
+function registerCodexMcp(spawn, hasCodex, logStep) {
   console.log("");
-  console.log("[5/6] Registering MCP server for Codex...");
+  logStep("Registering MCP server for Codex...");
 
   if (hasCodex) {
     runCli(spawn, "codex", ["mcp", "remove", "codex-dialog"], {
@@ -345,9 +366,9 @@ function registerCodexMcp(spawn, hasCodex) {
   console.log("  Codex CLI not found; wrote MCP server fallback to ~/.codex/config.toml OK");
 }
 
-function installCodexSkills() {
+function installCodexSkills(logStep) {
   console.log("");
-  console.log("[6/6] Installing Codex skills...");
+  logStep("Installing Codex skills...");
 
   fs.mkdirSync(CODEX_SKILLS_DIR, { recursive: true });
   for (const skill of CODEX_SKILLS) {
@@ -360,7 +381,7 @@ function installCodexSkills() {
   }
 }
 
-function printSummary(mode) {
+function printSummary(mode, cliStatus) {
   console.log("");
   console.log("Installation complete!");
   console.log("");
@@ -375,6 +396,20 @@ function printSummary(mode) {
   console.log("");
   if (mode.installClaude) console.log(" Restart Claude Code to pick up updated MCP configuration and commands.");
   if (mode.installCodex) console.log(" Restart Codex to pick up updated MCP configuration and skills.");
+  if (!cliStatus.hasClaude || !cliStatus.hasCodex) {
+    console.log("");
+    console.log(" CLI check:");
+    if (!cliStatus.hasClaude) {
+      console.log("   WARNING: Claude Code CLI was not found on PATH.");
+      console.log("            Install it before using Claude Code as a host or review partner.");
+      console.log("            https://docs.anthropic.com/en/docs/claude-code");
+    }
+    if (!cliStatus.hasCodex) {
+      console.log("   WARNING: Codex CLI was not found on PATH.");
+      console.log("            Install it before using Codex as a host or review partner.");
+      console.log("            https://github.com/openai/codex");
+    }
+  }
   console.log("");
   console.log(" Usage:");
   if (mode.installClaude) {
@@ -401,32 +436,29 @@ async function main() {
   console.log(` Mode: ${modeLabel(mode)}`);
   console.log("");
 
-  console.log("[1/6] Checking prerequisites...");
+  const logStep = createStepLogger(plannedStepCount(mode));
+
+  logStep("Checking prerequisites...");
   checkNode();
 
   console.log("");
-  console.log("[2/6] Installing dependencies...");
+  logStep("Installing dependencies...");
   ensureDependencies();
 
   const spawn = await loadSpawn();
-  const hasClaude = cliExists(spawn, "claude");
-  const hasCodex = cliExists(spawn, "codex");
-  console.log("");
-  console.log("[CLI] Checking partner CLIs...");
-  console.log(hasClaude ? "  Claude CLI OK" : "  WARNING: Claude CLI not found on PATH.");
-  console.log(hasCodex ? "  Codex CLI OK" : "  WARNING: Codex CLI not found on PATH.");
+  const cliStatus = checkPartnerClis(spawn, logStep);
 
   if (mode.installClaude) {
-    registerClaudeMcp(spawn, hasClaude);
-    installClaudeCommandsAndHooks();
+    registerClaudeMcp(spawn, cliStatus.hasClaude, logStep);
+    installClaudeCommandsAndHooks(logStep);
   }
 
   if (mode.installCodex) {
-    registerCodexMcp(spawn, hasCodex);
-    installCodexSkills();
+    registerCodexMcp(spawn, cliStatus.hasCodex, logStep);
+    installCodexSkills(logStep);
   }
 
-  printSummary(mode);
+  printSummary(mode, cliStatus);
 }
 
 main().catch((err) => {
