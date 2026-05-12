@@ -87,10 +87,10 @@ Keep the discussion efficient:
 
 ## Completion
 
-When Claude says `LGTM`, or the hard cap is reached:
+When `review_status.approved` is true in `check_messages` / `get_review_summary`, or the hard cap is reached:
 
 1. Call `mcp__codex-dialog__get_review_summary`
-2. Report the verdict, rounds used, and session id
+2. Report the verdict from `review_status`, rounds used, and session id
 3. Call `mcp__codex-dialog__end_dialog`
 
-Do not claim approval unless Claude actually said `LGTM`.
+Do not claim approval unless the MCP `review_status.approved` field is true.

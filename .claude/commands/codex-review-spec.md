@@ -142,10 +142,10 @@ For each significant finding, categorize as (do not inflate categories — defin
 - **[PRAISE]** — optional; call out a design decision genuinely worth keeping, one or two lines. Only when honest — forced praise is worthless
 - **[NIT]** — cosmetic/wording/presentational. Group into one short trailing section or omit entirely
 
-At the end, give an overall verdict:
-- **APPROVE** — spec is solid, ready for planning/implementation
-- **NEEDS_DISCUSSION** — some issues need resolution first
-- **MAJOR_CONCERNS** — significant problems that must be addressed
+At the end, set the machine-readable verdict on its own line:
+- `REVIEW_VERDICT: APPROVE` — spec is solid, ready for planning/implementation
+- `REVIEW_VERDICT: NEEDS_DISCUSSION` — some issues need resolution first
+- `REVIEW_VERDICT: CHANGES_REQUESTED` — significant problems must be addressed
 ```
 
 Save the returned `session_id`.
@@ -182,7 +182,7 @@ Read the review carefully once it arrives.
 
 ## PHASE 3: DISCUSSION LOOP
 
-Loop until Codex says APPROVE, the hard cap is hit, or the remaining disagreements need the user. The `budget` field in each `check_messages` / `send_message` response shows where you stand.
+Loop until `review_status.approved` is true, the hard cap is hit, or the remaining disagreements need the user. The `budget` and `review_status` fields in each `check_messages` / `send_message` response show where you stand.
 
 ### Step 3.1: Investigate Findings
 
@@ -228,11 +228,11 @@ Arm the same one-shot **Monitor** described in Phase 2 to wait for Codex's next 
 Codex will:
 - Accept or push back on your responses
 - Raise follow-up concerns
-- Say **APPROVE** when satisfied
+- Set `review_status.approved` when satisfied
 
 ### Step 3.4: Check Verdict
 
-If Codex's response contains "APPROVE", the review is complete — go to Phase 4.
+After every `check_messages` call, inspect `review_status`. If `review_status.approved` is true, the review is complete — go to Phase 4. Treat the structured field as authoritative rather than re-prompting for a prose-only approval token.
 
 Otherwise, continue the loop.
 

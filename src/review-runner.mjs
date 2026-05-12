@@ -168,11 +168,16 @@ You can read any files in this directory to understand context beyond the diff.
 
   const isInitialReview = partnerTurns === 0;
 
-  const refFilesBlock = `
-## File References (IMPORTANT)
-At the very end of your response, on its own line, list every source file you referenced or made claims about using exactly this format:
+  const machineFooterBlock = `
+## Machine-Readable Footer (IMPORTANT)
+End every response with these machine-readable lines, after your prose:
+
+REVIEW_VERDICT: <APPROVE|CHANGES_REQUESTED|NEEDS_DISCUSSION>
 REFERENCED_FILES: path/to/file1.ext, path/to/file2.ext
-Use paths relative to the project root (${projectPath}). This line is machine-parsed to ensure your discussion partner verifies your claims by reading the actual code. If you made no file-specific claims, omit this line entirely.`;
+
+Use REVIEW_VERDICT: APPROVE only when all significant issues are resolved and no material concern remains. Use REVIEW_VERDICT: CHANGES_REQUESTED when you found issues that should be addressed. Use REVIEW_VERDICT: NEEDS_DISCUSSION when the remaining decision needs the host or user to answer a question before you can approve.
+
+Use paths relative to the project root (${projectPath}) in REFERENCED_FILES. This line is machine-parsed to ensure your discussion partner verifies your claims by reading the actual code. If you made no file-specific claims, omit REFERENCED_FILES, but always include REVIEW_VERDICT.`;
 
   if (isInitialReview) {
     prompt += `## Your Task — Initial Review
@@ -192,9 +197,9 @@ ${meta.review_focus ? `- Prioritize your review around: ${meta.review_focus}` : 
   - **[NIT]** — cosmetic/stylistic. Group into one short trailing "Nits" section or omit entirely.
 - Deliver the complete review in this message. Do not hold findings back for later rounds.
 - At the end, give an overall assessment: approve, request changes, or needs discussion.
-${refFilesBlock}
+${machineFooterBlock}
 
-Respond with ONLY your review (plus the REFERENCED_FILES line). Do NOT wrap it in any JSON or metadata.`;
+Respond with ONLY your review and the machine-readable footer. Do NOT wrap it in any JSON or metadata.`;
   } else {
     prompt += `## Your Task — Follow-up
 - Address ${HOST_DISPLAY}'s responses to your review comments.
@@ -202,10 +207,10 @@ Respond with ONLY your review (plus the REFERENCED_FILES line). Do NOT wrap it i
 - If ${HOST_DISPLAY} disagreed with a finding, either accept the reasoning or explain why you still think there is an issue.
 - If new issues came up in discussion, address those too — but only if they meet the same severity bar as the initial review.
 - Deliver complete follow-up in this message. Do not split follow-up findings across additional rounds.
-- When all significant issues are resolved, say "LGTM" with a brief summary of what was reviewed and resolved.
-${refFilesBlock}
+- When all significant issues are resolved, set REVIEW_VERDICT: APPROVE in the machine-readable footer and include a brief summary of what was reviewed and resolved in your prose.
+${machineFooterBlock}
 
-Respond with ONLY your message (plus the REFERENCED_FILES line). Do NOT wrap it in any JSON or metadata.`;
+Respond with ONLY your message and the machine-readable footer. Do NOT wrap it in any JSON or metadata.`;
   }
 
   return prompt;

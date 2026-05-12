@@ -81,10 +81,10 @@ Categorize findings as:
 - [PRAISE]
 - [NIT]
 
-At the end, give one verdict:
-- APPROVE
-- NEEDS_DISCUSSION
-- MAJOR_CONCERNS
+At the end, set one machine-readable verdict on its own line:
+- `REVIEW_VERDICT: APPROVE`
+- `REVIEW_VERDICT: NEEDS_DISCUSSION`
+- `REVIEW_VERDICT: CHANGES_REQUESTED`
 
 The server will include a `Current Spec Snapshot` section by rereading the spec file from `subject_path` before every Claude turn. Treat that snapshot as the authoritative current spec.
 ```
@@ -115,9 +115,9 @@ If the same disagreement persists across 2+ rounds, summarize both positions and
 
 ## Completion
 
-When Claude says `APPROVE`, or the hard cap is reached:
+When `review_status.approved` is true in `check_messages`, or the hard cap is reached:
 
 1. Summarize the outcome, file path, rounds used, and session id
 2. Call `mcp__codex-dialog__end_dialog`
 
-Do not say the spec is approved unless Claude actually said `APPROVE`.
+Do not say the spec is approved unless the MCP `review_status.approved` field is true.

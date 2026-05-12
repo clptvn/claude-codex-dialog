@@ -14,7 +14,7 @@ Uses the `codex-dialog` MCP server to have Codex CLI review your code changes in
 2. Codex **automatically generates an initial review** from the diff (no first message needed)
 3. You arm a `Monitor` on the session's `conversation.jsonl` that fires one notification when Codex responds, then call `check_messages` to read it
 4. You respond to findings with `send_message`, discussing or fixing issues
-5. Codex re-reviews and responds until it says "LGTM" or you end the session
+5. Codex re-reviews and responds until the MCP `review_status.approved` field is true or you end the session
 
 ---
 
@@ -115,7 +115,7 @@ Once you receive the initial review, read it carefully. The review uses a severi
 
 ## PHASE 3: REVIEW DISCUSSION LOOP
 
-Loop until Codex says LGTM, the hard cap is hit, or the remaining disagreements need the user. Check the `budget` field in each `check_messages` / `send_message` response to know where you stand.
+Loop until `review_status.approved` is true, the hard cap is hit, or the remaining disagreements need the user. Check the `budget` and `review_status` fields in each `check_messages` / `send_message` response to know where you stand.
 
 ### Step 3.1: Investigate and Respond to Findings
 
@@ -161,11 +161,11 @@ Arm the same one-shot **Monitor** described in Phase 2 to wait for Codex's next 
 Codex will:
 - Verify your fixes look correct
 - Accept or push back on disagreements
-- Say "LGTM" when all significant issues are resolved
+- Set `review_status.approved` once all significant issues are resolved
 
-### Step 3.4: Check for LGTM
+### Step 3.4: Check Review Status
 
-If Codex's response contains "LGTM", the review is complete — go to Phase 4.
+After every `check_messages` call, inspect `review_status`. If `review_status.approved` is true, the review is complete — go to Phase 4. Do not start another round just because the prose approval wording differs; the structured field is authoritative.
 
 Otherwise, continue the loop with the next round.
 
@@ -175,7 +175,7 @@ Otherwise, continue the loop with the next round.
 
 ## PHASE 4: COMPLETION
 
-Call `get_review_summary` to get the final state, then report:
+Call `get_review_summary` to get the final state, then report the verdict from `review_status`:
 
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

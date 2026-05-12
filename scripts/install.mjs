@@ -202,6 +202,15 @@ function installHookFile(fileName) {
   fs.writeFileSync(targetPath, content);
 }
 
+function installSharedFile() {
+  const sourcePath = path.join(REPO_ROOT, "src", "shared.mjs");
+  const targetPath = path.join(CLAUDE_HOOKS_DIR, "shared.mjs");
+  const content = fs
+    .readFileSync(sourcePath, "utf-8")
+    .replaceAll("./platform.mjs", "../codex-dialog-platform.mjs");
+  fs.writeFileSync(targetPath, content);
+}
+
 function registerClaudeMcp(spawn, hasClaude, logStep) {
   console.log("");
   logStep("Registering MCP server for Claude...");
@@ -249,6 +258,7 @@ function installClaudeCommandsAndHooks(logStep) {
 
   fs.mkdirSync(CLAUDE_HOOKS_DIR, { recursive: true });
   fs.copyFileSync(path.join(REPO_ROOT, "src", "platform.mjs"), CLAUDE_HOOKS_PLATFORM);
+  installSharedFile();
   for (const fileName of HOOK_FILES) {
     installHookFile(fileName);
   }

@@ -27,7 +27,7 @@ A bidirectional MCP server for [Claude Code](https://docs.anthropic.com/en/docs/
 2. The server generates a git diff and spawns a review runner
 3. The partner agent auto-generates an initial review from the diff
 4. The host reads findings via `check_messages`, investigates, fixes or rebuts, and replies with `send_message`
-5. The review continues until the partner says `LGTM` or the session is ended
+5. The review continues until MCP responses report `review_status.approved: true`, the hard cap is reached, or the session is ended
 
 Session data is stored under `~/.claude/dialogs/`.
 
@@ -129,18 +129,26 @@ Restart the relevant CLI after installation or uninstall so it reloads MCP confi
 | Tool | Description |
 |------|-------------|
 | `start_code_review` | Start a review session where the configured partner auto-generates an initial review from a git diff |
-| `get_review_summary` | Get review metadata, structured findings, and approval status |
+| `get_review_summary` | Get review metadata, structured findings, and `review_status` approval state |
 
 ### Shared
 
 | Tool | Description |
 |------|-------------|
 | `send_message` | Send a message from the host agent into an ongoing session |
-| `check_messages` | Read new partner messages and current runner status |
+| `check_messages` | Read new partner messages, current runner status, and parsed `review_status` |
 | `get_full_history` | Get the complete conversation history |
 | `check_partner_alive` | Check whether the partner runner process is still running |
 | `end_dialog` | End the session and return the final conversation |
 | `list_sessions` | List all dialog and review sessions |
+
+`review_status` uses closed enum values:
+
+- `state`: `approved`, `changes_requested`, `needs_discussion`, `in_progress`, `hard_cap_reached`
+- `verdict`: `APPROVE`, `CHANGES_REQUESTED`, `NEEDS_DISCUSSION`, `IN_PROGRESS`, `HARD_CAP_REACHED`, or `null`
+- `source`: `structured_verdict`, `legacy_lgtm`, `legacy_approve`, `blocking_findings`, `hard_cap`, `none`
+- `close_allowed_reason`: `approved`, `hard_cap`, or `null`
+- Always-present fields: `schema_version`, `state`, `approved`, `close_allowed`, `close_allowed_reason`, `verdict`, `source`, `source_message_id`, `partner_agent`, `allows_approve_verdict`, and `hard_cap_reached`
 
 ## Usage
 

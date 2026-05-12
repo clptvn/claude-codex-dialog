@@ -16,6 +16,7 @@ import {
   appendMessage,
   isProcessAlive,
   readStatus,
+  computeReviewStatus,
 } from "./shared.mjs";
 
 const server = new McpServer({
@@ -42,6 +43,16 @@ function appendMsg(sessionId, from, content) {
 
 function readStat(sessionId) {
   return readStatus(resolveSessionDir(sessionId));
+}
+
+function readProblem(sessionDir) {
+  const problemPath = path.join(sessionDir, "problem.md");
+  if (!fs.existsSync(problemPath)) return "";
+  try {
+    return fs.readFileSync(problemPath, "utf-8");
+  } catch {
+    return "";
+  }
 }
 
 function resolvePartnerCommandValue(
@@ -752,11 +763,10 @@ server.tool(
       }
     }
 
-    const hasLgtm = messages.some(
-      (m) => m.from === partnerAgent && /(?:^|\n)\s*LGTM\b/i.test(m.content)
-    );
-
     const budget = computeBudget(status, messages);
+    const reviewStatus = computeReviewStatus(status, messages, {
+      problem: readProblem(sessionDir),
+    });
 
     return {
       content: [
@@ -767,7 +777,8 @@ server.tool(
               meta,
               total_messages: messages.length,
               findings,
-              approved: hasLgtm,
+              approved: reviewStatus.approved,
+              review_status: reviewStatus,
               budget,
               messages,
             },
@@ -846,7 +857,11 @@ server.tool(
     }
 
     const msg = appendMsg(session_id, hostAgent, content);
-    const budget = computeBudget(status, readConv(session_id));
+    const messages = readConv(session_id);
+    const budget = computeBudget(status, messages);
+    const reviewStatus = computeReviewStatus(status, messages, {
+      problem: readProblem(sessionDir),
+    });
     return {
       content: [
         {
@@ -858,6 +873,7 @@ server.tool(
               host_agent: hostAgent,
               partner_agent: partnerAgent,
               budget,
+              review_status: reviewStatus,
               message: `Message sent (id: ${msg.id}). ${partnerDisplay} will be invoked to respond.`,
             },
             null,
@@ -907,6 +923,9 @@ server.tool(
       : null;
 
     const budget = computeBudget(status, messages);
+    const reviewStatus = computeReviewStatus(status, messages, {
+      problem: readProblem(sessionDir),
+    });
     const projectPath = status?.project_path || process.cwd();
     const referencedFiles = extractReferencedFiles(
       newMessages,
@@ -936,6 +955,7 @@ server.tool(
                 : {}),
               last_error: lastError,
               budget,
+              review_status: reviewStatus,
               referenced_files: referencedFiles,
             },
             null,
@@ -963,6 +983,9 @@ server.tool(
     const status = readStat(session_id);
     const partnerAgent = getSessionPartnerAgent(status);
     const projectPath = status?.project_path || process.cwd();
+    const reviewStatus = computeReviewStatus(status, messages, {
+      problem: readProblem(sessionDir),
+    });
     const referencedFiles = extractReferencedFiles(
       messages,
       projectPath,
@@ -1000,7 +1023,7 @@ server.tool(
       content: [
         {
           type: "text",
-          text: JSON.stringify({ problem, current_subject: currentSubject, review_meta: meta, messages, referenced_files: referencedFiles }, null, 2),
+          text: JSON.stringify({ problem, current_subject: currentSubject, review_meta: meta, messages, review_status: reviewStatus, referenced_files: referencedFiles }, null, 2),
         },
       ],
     };
@@ -1053,6 +1076,9 @@ server.tool(
     }
 
     const budget = computeBudget(status, messages);
+    const reviewStatus = computeReviewStatus(status, messages, {
+      problem: readProblem(sessionDir),
+    });
 
     return {
       content: [
@@ -1077,6 +1103,7 @@ server.tool(
               started_at: status?.started_at,
               recent_log: logTail,
               budget,
+              review_status: reviewStatus,
             },
             null,
             2
@@ -1113,6 +1140,9 @@ server.tool(
     }
 
     const messages = readConv(session_id);
+    const reviewStatus = computeReviewStatus(status, messages, {
+      problem: readProblem(sessionDir),
+    });
     return {
       content: [
         {
@@ -1122,6 +1152,7 @@ server.tool(
               ended: true,
               session_type: status?.type || "unknown",
               total_messages: messages.length,
+              review_status: reviewStatus,
               messages,
             },
             null,

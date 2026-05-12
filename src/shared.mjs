@@ -5,6 +5,9 @@ import { dialogsDir } from "./platform.mjs";
 export const DIALOGS_DIR = dialogsDir();
 fs.mkdirSync(DIALOGS_DIR, { recursive: true });
 export const KNOWN_AGENTS = ["claude", "codex"];
+const BLOCKING_FINDING_RE =
+  /\[(CRITICAL|CORRECTNESS|ARCHITECTURE|SECURITY|ROBUSTNESS|GAP|AMBIGUITY|SCOPE|FEASIBILITY|UX|TESTABILITY)\]/i;
+const REVIEW_STATUS_SCHEMA_VERSION = 1;
 
 export function normalizeAgent(agent, fallback = "codex") {
   return KNOWN_AGENTS.includes(agent) ? agent : fallback;
@@ -20,6 +23,243 @@ export function getSessionPartnerAgent(status) {
 
 export function getAgentDisplayName(agent) {
   return normalizeAgent(agent, "codex") === "claude" ? "Claude" : "Codex";
+}
+
+export function isReviewApprovalDialog(problem) {
+  return (
+    /^Implementation plan review\b/i.test(problem || "") ||
+    /^Feature spec review\b/i.test(problem || "") ||
+    /^##\s*Plan Review Request\b/im.test(problem || "") ||
+    /^##\s*Spec Review Request\b/im.test(problem || "")
+  );
+}
+
+function stripMarkdownNoise(content) {
+  return String(content || "")
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/~~~[\s\S]*?~~~/g, "")
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .split("\n")
+    .filter((line) => !line.trimStart().startsWith(">"))
+    .filter((line) => !/^(?: {4,}|\t)/.test(line))
+    .join("\n");
+}
+
+function normalizeStructuredVerdict(raw) {
+  const verdict = String(raw || "")
+    .trim()
+    .replace(/[*`]+/g, "")
+    .replace(/[.!?;,]+$/g, "")
+    .toUpperCase()
+    .replace(/[\s-]+/g, "_");
+
+  if (verdict === "LGTM") {
+    return { state: "approved", verdict: "APPROVE", approved: true };
+  }
+  if (verdict === "APPROVE" || verdict === "APPROVED") {
+    return { state: "approved", verdict: "APPROVE", approved: true };
+  }
+  if (
+    [
+      "REQUEST_CHANGES",
+      "CHANGES_REQUESTED",
+      "NEEDS_CHANGES",
+      "MAJOR_CONCERNS",
+      "BLOCKED",
+    ].includes(verdict)
+  ) {
+    return {
+      state: "changes_requested",
+      verdict: "CHANGES_REQUESTED",
+      approved: false,
+    };
+  }
+  if (verdict === "NEEDS_DISCUSSION") {
+    return {
+      state: "needs_discussion",
+      verdict: "NEEDS_DISCUSSION",
+      approved: false,
+    };
+  }
+  if (["IN_PROGRESS", "PENDING"].includes(verdict)) {
+    return {
+      state: "in_progress",
+      verdict: "IN_PROGRESS",
+      approved: false,
+    };
+  }
+  return null;
+}
+
+function extractStructuredVerdict(content) {
+  const searchable = stripMarkdownNoise(content);
+  let lastVerdict = null;
+  for (const line of searchable.split("\n")) {
+    const match = line.match(
+      /^\s*(?:[-*#]+\s*)?(?:\*\*|__|\*)?\s*(?:REVIEW[_\s-]?(?:VERDICT|STATUS)|VERDICT|STATUS)(?:\*\*|__|\*)?\s*:\s*(?:\*\*|__|\*)?\s*([A-Z][A-Z_\s-]*)\b/i
+    );
+    if (!match) continue;
+    const normalized = normalizeStructuredVerdict(match[1]);
+    if (normalized) {
+      lastVerdict = { ...normalized, source: "structured_verdict" };
+    }
+  }
+  return lastVerdict;
+}
+
+function hasLegacyApprovalLine(content, token) {
+  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const tokenAtLineStart = new RegExp(
+    `^\\s*(?:[-*]\\s*)?(?:\\*\\*)?${escaped}(?:\\*\\*)?(?=$|[\\s.!,:;])`,
+    "i"
+  );
+  return stripMarkdownNoise(content)
+    .split("\n")
+    .some((line) => tokenAtLineStart.test(line));
+}
+
+function hasLegacyApproval(content, allowsApproveVerdict) {
+  if (hasLegacyApprovalLine(content, "LGTM")) {
+    return { state: "approved", verdict: "APPROVE", approved: true, source: "legacy_lgtm" };
+  }
+  if (allowsApproveVerdict && hasLegacyApprovalLine(content, "APPROVE")) {
+    return {
+      state: "approved",
+      verdict: "APPROVE",
+      approved: true,
+      source: "legacy_approve",
+    };
+  }
+  return null;
+}
+
+function hasBlockingFindings(content) {
+  return stripMarkdownNoise(content)
+    .split("\n")
+    .some((line) => {
+      if (!BLOCKING_FINDING_RE.test(line)) return false;
+      const resolvedReference =
+        /\b(?:addressed|cleared|fixed|previously raised|remains fixed|resolved|still fixed)\b/i.test(line) &&
+        !/\b(?:new issue|not fixed|not resolved|regression|still broken|still failing|unresolved)\b/i.test(line);
+      return !resolvedReference;
+    });
+}
+
+export function extractReviewVerdict(content, options = {}) {
+  const allowsApproveVerdict = Boolean(options.allowsApproveVerdict);
+  return (
+    extractStructuredVerdict(content) ||
+    hasLegacyApproval(content, allowsApproveVerdict)
+  );
+}
+
+function buildReviewStatus({
+  state,
+  approved,
+  closeAllowed,
+  closeAllowedReason,
+  verdict,
+  source,
+  sourceMessageId,
+  partnerAgent,
+  allowsApproveVerdict,
+  hardCapReached,
+}) {
+  return {
+    schema_version: REVIEW_STATUS_SCHEMA_VERSION,
+    state,
+    approved,
+    close_allowed: closeAllowed,
+    close_allowed_reason: closeAllowedReason,
+    verdict,
+    source,
+    source_message_id: sourceMessageId,
+    partner_agent: partnerAgent,
+    allows_approve_verdict: allowsApproveVerdict,
+    hard_cap_reached: hardCapReached,
+  };
+}
+
+export function computeReviewStatus(status, messages, options = {}) {
+  const partnerAgent = getSessionPartnerAgent(status);
+  const problem = options.problem || "";
+  const allowsApproveVerdict = isReviewApprovalDialog(problem);
+  const maxRounds = status?.max_rounds ?? 5;
+  const hardCap = status?.hard_cap ?? maxRounds + 5;
+  const partnerMessages = messages.filter((m) => m.from === partnerAgent);
+  const hardCapReached = partnerMessages.length >= hardCap;
+
+  let verdictSignal = null;
+  for (let i = partnerMessages.length - 1; i >= 0; i--) {
+    const msg = partnerMessages[i];
+    const verdict = extractStructuredVerdict(msg.content);
+    if (verdict) {
+      verdictSignal = { ...verdict, sourceMessageId: msg.id };
+      break;
+    }
+  }
+
+  for (let i = partnerMessages.length - 1; i >= 0; i--) {
+    const msg = partnerMessages[i];
+    const verdict = hasLegacyApproval(msg.content, allowsApproveVerdict);
+    if (verdict) {
+      if (!verdictSignal || msg.id > verdictSignal.sourceMessageId) {
+        verdictSignal = { ...verdict, sourceMessageId: msg.id };
+      }
+      break;
+    }
+  }
+
+  for (let i = partnerMessages.length - 1; i >= 0; i--) {
+    const msg = partnerMessages[i];
+    if (verdictSignal && msg.id < verdictSignal.sourceMessageId) break;
+    if (hasBlockingFindings(msg.content)) {
+      return buildReviewStatus({
+        state: "changes_requested",
+        approved: false,
+        closeAllowed: hardCapReached,
+        closeAllowedReason: hardCapReached ? "hard_cap" : null,
+        verdict: "CHANGES_REQUESTED",
+        source: "blocking_findings",
+        sourceMessageId: msg.id,
+        partnerAgent,
+        allowsApproveVerdict,
+        hardCapReached,
+      });
+    }
+  }
+
+  if (verdictSignal) {
+    return buildReviewStatus({
+      state: verdictSignal.state,
+      approved: verdictSignal.approved,
+      closeAllowed: verdictSignal.approved || hardCapReached,
+      closeAllowedReason: verdictSignal.approved
+        ? "approved"
+        : hardCapReached
+          ? "hard_cap"
+          : null,
+      verdict: verdictSignal.verdict,
+      source: verdictSignal.source,
+      sourceMessageId: verdictSignal.sourceMessageId,
+      partnerAgent,
+      allowsApproveVerdict,
+      hardCapReached,
+    });
+  }
+
+  return buildReviewStatus({
+    state: hardCapReached ? "hard_cap_reached" : "in_progress",
+    approved: false,
+    closeAllowed: hardCapReached,
+    closeAllowedReason: hardCapReached ? "hard_cap" : null,
+    verdict: hardCapReached ? "HARD_CAP_REACHED" : null,
+    source: hardCapReached ? "hard_cap" : "none",
+    sourceMessageId: null,
+    partnerAgent,
+    allowsApproveVerdict,
+    hardCapReached,
+  });
 }
 
 function resolveConvPath(sessionDir) {
