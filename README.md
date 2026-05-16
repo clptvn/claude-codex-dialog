@@ -137,6 +137,7 @@ Restart the relevant CLI after installation or uninstall so it reloads MCP confi
 |------|-------------|
 | `send_message` | Send a message from the host agent into an ongoing session |
 | `check_messages` | Read new partner messages, current runner status, and parsed `review_status` |
+| `wait_for_partner_response` | Long-poll until the partner replies, the session reaches a terminal condition, or the wait times out |
 | `get_full_history` | Get the complete conversation history |
 | `check_partner_alive` | Check whether the partner runner process is still running |
 | `end_dialog` | End the session and return the final conversation |
@@ -149,6 +150,16 @@ Restart the relevant CLI after installation or uninstall so it reloads MCP confi
 - `source`: `structured_verdict`, `legacy_lgtm`, `legacy_approve`, `blocking_findings`, `hard_cap`, `none`
 - `close_allowed_reason`: `approved`, `hard_cap`, or `null`
 - Always-present fields: `schema_version`, `state`, `approved`, `close_allowed`, `close_allowed_reason`, `verdict`, `source`, `source_message_id`, `partner_agent`, `allows_approve_verdict`, and `hard_cap_reached`
+
+### Waiting for partner responses
+
+Use `wait_for_partner_response` instead of repeatedly polling while the background runner is invoking the partner CLI.
+
+- After `start_code_review`, call `wait_for_partner_response` with `since_id: 0` to wait for the initial review.
+- After `send_message`, call `wait_for_partner_response` with `since_id` set to the returned `message_id`.
+- The default wait timeout is 10 minutes. Explicit waits are clamped to the session's `partner_timeout_ms` minus 1 minute, with an absolute max of 60 minutes.
+- The tool returns the same public payload as `check_messages`, plus `wait_result`, `waited_ms`, `timed_out`, and `next_since_id`.
+- `wait_result` is one of `message`, `error`, `runner_exited`, `ended`, `hard_cap`, `timeout_processing`, `timeout_idle`, or `cancelled`.
 
 ## Usage
 
@@ -196,6 +207,7 @@ Both `start_dialog` and `start_code_review` also accept:
 - `model`
 - `reasoning_effort`
 - `max_rounds`
+- `partner_timeout_ms`: maximum time for each partner CLI invocation. Defaults to `900000` (15 minutes) and accepts up to `3600000` (60 minutes). Use `1800000` for 30 minute max-effort Claude runs.
 
 `start_dialog` also accepts:
 
@@ -209,7 +221,7 @@ The server still accepts `codex_command` for backward compatibility, and also ac
 
 Each session has a soft round budget, default `5`, with a hard cap of `soft + 5`.
 
-Every `check_messages`, `send_message`, and `check_partner_alive` response includes:
+Every `check_messages`, `wait_for_partner_response`, `send_message`, and `check_partner_alive` response includes:
 
 ```json
 {

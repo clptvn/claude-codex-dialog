@@ -15,6 +15,7 @@ Interpret the invocation text as:
 - `rounds:N`
 - `effort:<level>`
 - `model:<name>`
+- `timeout:<minutes>` or `timeout:<minutes>m`: optional partner invocation timeout override, in minutes
 
 If a plan path is not provided, auto-detect from:
 
@@ -38,6 +39,7 @@ Determine the git root and call `mcp__codex-dialog__start_dialog` with:
 - `max_rounds` only if explicitly requested
 - `reasoning_effort` only if explicitly requested
 - `model` only if explicitly requested
+- `partner_timeout_ms` if `timeout:*` was explicitly requested, or `1800000` if `effort:max` was explicitly requested without a timeout override
 - `subject_path`: the resolved plan file path
 - `subject_kind`: `"plan"`
 - `problem_description`: a short summary such as `Implementation plan review for <path>. Claude Code will adversarially review feasibility, ordering, and completeness.`
@@ -80,9 +82,13 @@ The server will include a `Current Plan Snapshot` section by rereading the plan 
 
 ## Wait for Claude
 
-Prefer waiting on the session file with a shell tail if available. Otherwise poll `mcp__codex-dialog__check_messages` every 5 seconds.
+Preferred wait strategy:
 
-If Claude does not answer:
+1. Call `mcp__codex-dialog__wait_for_partner_response` with `session_id` and `since_id` set to the latest message you sent. If `partner_timeout_ms` was set, pass `timeout_ms: partner_timeout_ms - 60000`.
+2. If the wait tool is not exposed in the current session, fall back to waiting on the session file with a shell tail.
+3. If neither wait tool nor shell tail is available, poll `mcp__codex-dialog__check_messages` every 5 seconds.
+
+If `wait_result` is `timeout_processing` or `timeout_idle`:
 
 1. Call `mcp__codex-dialog__check_partner_alive`
 2. If the runner died, report that and stop

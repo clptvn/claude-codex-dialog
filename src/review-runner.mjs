@@ -28,6 +28,9 @@ const REASONING_EFFORT = process.argv[6] || null;
 const PARTNER_MODEL = process.argv[7] || null;
 const HOST_AGENT = normalizeAgent(process.argv[8], "claude");
 const PARTNER_AGENT = normalizeAgent(process.argv[9], "codex");
+const DEFAULT_PARTNER_TIMEOUT_MS = 15 * 60 * 1000;
+const PARTNER_TIMEOUT_MS =
+  Math.max(1000, parseInt(process.argv[10], 10)) || DEFAULT_PARTNER_TIMEOUT_MS;
 
 if (!sessionDir || HOST_AGENT === PARTNER_AGENT) {
   process.exit(1);
@@ -45,7 +48,6 @@ const LOG_PATH = path.join(sessionDir, "runner.log");
 
 const MAX_TURNS = HARD_CAP;
 const POLL_INTERVAL_MS = 5000;
-const PARTNER_TIMEOUT_MS = 15 * 60 * 1000;
 const MAX_IDLE_MS = 30 * 60 * 1000;
 const MAX_CONVERSATION_MESSAGES = 20;
 const MAX_DIFF_CHARS = 50000;

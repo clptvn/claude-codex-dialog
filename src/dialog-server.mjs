@@ -24,6 +24,16 @@ const server = new McpServer({
   version: "1.0.0",
 });
 
+const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1000;
+const DEFAULT_PARTNER_TIMEOUT_MS = 15 * 60 * 1000;
+const MAX_PARTNER_TIMEOUT_MS = 60 * 60 * 1000;
+const MIN_PARTNER_TIMEOUT_MS = 60 * 1000;
+const PARTNER_TIMEOUT_WAIT_HEADROOM_MS = 60 * 1000;
+const MAX_WAIT_TIMEOUT_MS = MAX_PARTNER_TIMEOUT_MS;
+const MIN_WAIT_TIMEOUT_MS = 1000;
+const WAIT_FALLBACK_INTERVAL_MS = 5000;
+const WAIT_PROGRESS_INTERVAL_MS = 30000;
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function resolveSessionDir(sessionId) {
@@ -52,6 +62,14 @@ function readProblem(sessionDir) {
     return fs.readFileSync(problemPath, "utf-8");
   } catch {
     return "";
+  }
+}
+
+function readOptionalText(filePath) {
+  try {
+    return fs.existsSync(filePath) ? fs.readFileSync(filePath, "utf-8") : null;
+  } catch {
+    return null;
   }
 }
 
@@ -167,6 +185,252 @@ function extractReferencedFiles(messages, projectPath, partnerAgent = "codex") {
   return [...validated];
 }
 
+function getLatestMessageId(messages) {
+  return messages.length > 0 ? messages[messages.length - 1].id : 0;
+}
+
+function getWakeMessages(messages, status, sinceId, includeSystem) {
+  const partnerAgent = getSessionPartnerAgent(status);
+  return messages.filter(
+    (m) =>
+      m.id > sinceId &&
+      (m.from === partnerAgent || (includeSystem && m.from === "system"))
+  );
+}
+
+function normalizePartnerTimeout(timeoutMs) {
+  if (timeoutMs == null) return DEFAULT_PARTNER_TIMEOUT_MS;
+  return Math.min(
+    MAX_PARTNER_TIMEOUT_MS,
+    Math.max(MIN_PARTNER_TIMEOUT_MS, timeoutMs)
+  );
+}
+
+function getWaitTimeoutLimit(status) {
+  const partnerTimeoutMs = normalizePartnerTimeout(status?.partner_timeout_ms);
+  return Math.max(
+    MIN_WAIT_TIMEOUT_MS,
+    Math.min(MAX_WAIT_TIMEOUT_MS, partnerTimeoutMs - PARTNER_TIMEOUT_WAIT_HEADROOM_MS)
+  );
+}
+
+function normalizeWaitTimeout(timeoutMs, status) {
+  const maxWaitTimeoutMs = getWaitTimeoutLimit(status);
+  if (timeoutMs == null) {
+    return Math.min(DEFAULT_WAIT_TIMEOUT_MS, maxWaitTimeoutMs);
+  }
+  return Math.min(
+    maxWaitTimeoutMs,
+    Math.max(MIN_WAIT_TIMEOUT_MS, timeoutMs)
+  );
+}
+
+function buildSessionSnapshot(sessionId, options = {}) {
+  const sessionDir = resolveSessionDir(sessionId);
+  const sinceId = options.sinceId || 0;
+  const messages = readConversation(sessionDir);
+  const newMessages = messages.filter((m) => m.id > sinceId);
+  const status = readStatus(sessionDir);
+  const hostAgent = getSessionHostAgent(status);
+  const partnerAgent = getSessionPartnerAgent(status);
+  const runnerAlive = status?.runner_pid
+    ? isProcessAlive(status.runner_pid)
+    : false;
+  const processingPath = getProcessingPath(sessionDir);
+  const partnerProcessing = fs.existsSync(processingPath);
+  const errorPath = path.join(sessionDir, "last_error.txt");
+  const lastError = readOptionalText(errorPath);
+  const budget = computeBudget(status, messages);
+  const reviewStatus = computeReviewStatus(status, messages, {
+    problem: readProblem(sessionDir),
+  });
+  const projectPath = status?.project_path || process.cwd();
+  const referencedFiles = extractReferencedFiles(
+    newMessages,
+    projectPath,
+    partnerAgent
+  );
+
+  const payload = {
+    new_messages: newMessages,
+    total_messages: messages.length,
+    latest_id: getLatestMessageId(messages),
+    host_agent: hostAgent,
+    partner_agent: partnerAgent,
+    partner_timeout_ms: normalizePartnerTimeout(status?.partner_timeout_ms),
+    partner_runner_alive: runnerAlive,
+    partner_currently_processing: partnerProcessing,
+    ...(partnerAgent === "codex"
+      ? {
+          codex_runner_alive: runnerAlive,
+          codex_currently_processing: partnerProcessing,
+        }
+      : {}),
+    last_error: lastError,
+    budget,
+    review_status: reviewStatus,
+    referenced_files: referencedFiles,
+  };
+
+  return {
+    payload,
+    internal: {
+      sessionDir,
+      messages,
+      status,
+      processingPath,
+      errorPath,
+      endSignalPath: path.join(sessionDir, "end_signal"),
+    },
+  };
+}
+
+function hasHardCapReached(snapshot) {
+  return Boolean(
+    snapshot.payload.review_status?.hard_cap_reached ||
+      snapshot.payload.budget?.hard_rounds_remaining === 0
+  );
+}
+
+function classifyWaitResult(snapshot, sinceId, includeSystem) {
+  if (snapshot.payload.last_error) return "error";
+  if (fs.existsSync(snapshot.internal.endSignalPath)) return "ended";
+  if (hasHardCapReached(snapshot)) return "hard_cap";
+  if (!snapshot.payload.partner_runner_alive) return "runner_exited";
+  if (
+    getWakeMessages(
+      snapshot.internal.messages,
+      snapshot.internal.status,
+      sinceId,
+      includeSystem
+    ).length > 0
+  ) {
+    return "message";
+  }
+  return null;
+}
+
+function addWaitMetadata(snapshot, waitResult, startedAt, timedOut = false) {
+  return {
+    ...snapshot.payload,
+    wait_result: waitResult,
+    waited_ms: Date.now() - startedAt,
+    timed_out: timedOut,
+    next_since_id: snapshot.payload.latest_id,
+  };
+}
+
+function safeWatch(targetPath, onChange, watchers) {
+  try {
+    const watcher = fs.watch(targetPath, onChange);
+    watchers.push(watcher);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function sendWaitProgress(extra, progressToken, startedAt, timeoutMs) {
+  if (progressToken == null) return;
+  const elapsedMs = Date.now() - startedAt;
+  try {
+    await extra.sendNotification({
+      method: "notifications/progress",
+      params: {
+        progressToken,
+        progress: elapsedMs,
+        total: timeoutMs,
+        message: `Waiting for partner response, ${Math.floor(elapsedMs / 1000)}s elapsed`,
+      },
+    });
+  } catch {
+    // Progress is best-effort; clients may omit or ignore progress support.
+  }
+}
+
+function waitForSessionChange(sessionId, options, extra) {
+  const sinceId = options.sinceId || 0;
+  const includeSystem = options.includeSystem !== false;
+  const startedAt = Date.now();
+  const sessionDir = resolveSessionDir(sessionId);
+  const timeoutMs = normalizeWaitTimeout(options.timeoutMs, readStatus(sessionDir));
+  const conversationPath = path.join(sessionDir, "conversation.jsonl");
+  const errorPath = path.join(sessionDir, "last_error.txt");
+  const endSignalPath = path.join(sessionDir, "end_signal");
+  const progressToken = extra?._meta?.progressToken;
+
+  return new Promise((resolve) => {
+    let done = false;
+    const watchers = [];
+    let fallbackTimer = null;
+    let timeoutTimer = null;
+    let progressTimer = null;
+
+    const cleanup = () => {
+      for (const watcher of watchers) {
+        try { watcher.close(); } catch {}
+      }
+      if (fallbackTimer) clearInterval(fallbackTimer);
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (progressTimer) clearInterval(progressTimer);
+      extra?.signal?.removeEventListener("abort", onAbort);
+    };
+
+    const finish = (snapshot, waitResult, timedOut = false) => {
+      if (done) return;
+      done = true;
+      cleanup();
+      resolve(addWaitMetadata(snapshot, waitResult, startedAt, timedOut));
+    };
+
+    const readSnapshot = () => buildSessionSnapshot(sessionId, { sinceId });
+
+    const check = () => {
+      if (done) return;
+      if (extra?.signal?.aborted) {
+        finish(readSnapshot(), "cancelled");
+        return;
+      }
+      const snapshot = readSnapshot();
+      const waitResult = classifyWaitResult(snapshot, sinceId, includeSystem);
+      if (waitResult) finish(snapshot, waitResult);
+    };
+
+    const onAbort = () => {
+      if (done) return;
+      finish(readSnapshot(), "cancelled");
+    };
+
+    const onTimeout = () => {
+      if (done) return;
+      const snapshot = readSnapshot();
+      const waitResult = snapshot.payload.partner_currently_processing
+        ? "timeout_processing"
+        : "timeout_idle";
+      finish(snapshot, waitResult, true);
+    };
+
+    const onFileChange = () => {
+      setImmediate(check);
+    };
+
+    safeWatch(sessionDir, onFileChange, watchers);
+    safeWatch(conversationPath, onFileChange, watchers);
+    if (fs.existsSync(errorPath)) safeWatch(errorPath, onFileChange, watchers);
+    if (fs.existsSync(endSignalPath)) safeWatch(endSignalPath, onFileChange, watchers);
+
+    fallbackTimer = setInterval(check, WAIT_FALLBACK_INTERVAL_MS);
+    timeoutTimer = setTimeout(onTimeout, timeoutMs);
+    progressTimer = setInterval(
+      () => sendWaitProgress(extra, progressToken, startedAt, timeoutMs),
+      WAIT_PROGRESS_INTERVAL_MS
+    );
+    extra?.signal?.addEventListener("abort", onAbort, { once: true });
+
+    check();
+  });
+}
+
 // ── Dialog Tools ────────────────────────────────────────────────────────────
 
 server.tool(
@@ -219,6 +483,13 @@ server.tool(
       .string()
       .optional()
       .describe("Optional partner model override. Omit to use the partner CLI default."),
+    partner_timeout_ms: z
+      .number()
+      .int()
+      .min(MIN_PARTNER_TIMEOUT_MS)
+      .max(MAX_PARTNER_TIMEOUT_MS)
+      .optional()
+      .describe("Maximum time in milliseconds for each partner CLI invocation (default: 900000 = 15 minutes, max: 3600000 = 60 minutes). Use 1800000 for 30 minutes on slow max-effort Claude runs."),
     tool_profile: z
       .enum(["read", "implementation"])
       .optional()
@@ -247,6 +518,7 @@ server.tool(
     max_rounds,
     reasoning_effort,
     model,
+    partner_timeout_ms,
     tool_profile,
     subject_path,
     subject_kind,
@@ -269,6 +541,7 @@ server.tool(
 
     const softCap = max_rounds || 5;
     const hardCap = softCap + 5;
+    const partnerTimeoutMs = normalizePartnerTimeout(partner_timeout_ms);
     const partnerCommand = resolvePartnerCommandValue(
       partnerAgent,
       partner_command,
@@ -311,6 +584,7 @@ server.tool(
       hard_cap: hardCap,
       reasoning_effort: reasoning_effort || null,
       model: model || null,
+      partner_timeout_ms: partnerTimeoutMs,
       tool_profile: tool_profile || "read",
       subject_path: subjectPath,
       subject_kind: subjectPath ? (subject_kind || "document") : null,
@@ -334,6 +608,7 @@ server.tool(
       hostAgent,
       partnerAgent,
       tool_profile || "read",
+      String(partnerTimeoutMs),
     ];
     const runner = spawn(
       process.execPath,
@@ -371,11 +646,12 @@ server.tool(
               hard_cap: hardCap,
               reasoning_effort: reasoning_effort || "partner default",
               model: model || "default",
+              partner_timeout_ms: partnerTimeoutMs,
               tool_profile: tool_profile || "read",
               subject_path: subjectPath,
               subject_kind: subjectPath ? (subject_kind || "document") : null,
               message:
-                `Dialog started with a soft budget of ${softCap} rounds (hard cap ${hardCap}), model: ${model || "default"}, reasoning effort: ${reasoning_effort || "partner default"}, tool profile: ${tool_profile || "read"}. Send your first message with send_message, then wait for ${partnerDisplay}.`,
+                `Dialog started with a soft budget of ${softCap} rounds (hard cap ${hardCap}), partner timeout ${(partnerTimeoutMs / 60000).toFixed(1)} minutes, model: ${model || "default"}, reasoning effort: ${reasoning_effort || "partner default"}, tool profile: ${tool_profile || "read"}. Send your first message with send_message, then wait for ${partnerDisplay}.`,
             },
             null,
             2
@@ -454,6 +730,13 @@ server.tool(
       .string()
       .optional()
       .describe("Optional partner model override."),
+    partner_timeout_ms: z
+      .number()
+      .int()
+      .min(MIN_PARTNER_TIMEOUT_MS)
+      .max(MAX_PARTNER_TIMEOUT_MS)
+      .optional()
+      .describe("Maximum time in milliseconds for each partner CLI invocation (default: 900000 = 15 minutes, max: 3600000 = 60 minutes). Use 1800000 for 30 minutes on slow max-effort Claude reviews."),
   },
   async ({
     project_path,
@@ -469,6 +752,7 @@ server.tool(
     max_rounds,
     reasoning_effort,
     model,
+    partner_timeout_ms,
   }) => {
     const hostAgent = normalizeAgent(host_agent, "claude");
     const partnerAgent = normalizeAgent(partner_agent, "codex");
@@ -490,6 +774,7 @@ server.tool(
     }
     const softCap = max_rounds || 5;
     const hardCap = softCap + 5;
+    const partnerTimeoutMs = normalizePartnerTimeout(partner_timeout_ms);
     const partnerCommand = resolvePartnerCommandValue(
       partnerAgent,
       partner_command,
@@ -642,6 +927,7 @@ server.tool(
       hard_cap: hardCap,
       reasoning_effort: reasoning_effort || null,
       model: model || null,
+      partner_timeout_ms: partnerTimeoutMs,
       runner_pid: null,
     };
     fs.writeFileSync(
@@ -661,6 +947,7 @@ server.tool(
       model || "",
       hostAgent,
       partnerAgent,
+      String(partnerTimeoutMs),
     ];
     const runner = spawn(
       process.execPath,
@@ -701,8 +988,9 @@ server.tool(
               hard_cap: hardCap,
               reasoning_effort: reasoning_effort || "partner default",
               model: model || "default",
+              partner_timeout_ms: partnerTimeoutMs,
               message:
-                `Code review started with a soft budget of ${softCap} rounds (hard cap ${hardCap}), model: ${model || "default"}, reasoning effort: ${reasoning_effort || "partner default"}. ${partnerDisplay} is generating an initial review.`,
+                `Code review started with a soft budget of ${softCap} rounds (hard cap ${hardCap}), partner timeout ${(partnerTimeoutMs / 60000).toFixed(1)} minutes, model: ${model || "default"}, reasoning effort: ${reasoning_effort || "partner default"}. ${partnerDisplay} is generating an initial review.`,
             },
             null,
             2
@@ -872,6 +1160,7 @@ server.tool(
               message_id: msg.id,
               host_agent: hostAgent,
               partner_agent: partnerAgent,
+              partner_timeout_ms: normalizePartnerTimeout(status?.partner_timeout_ms),
               budget,
               review_status: reviewStatus,
               message: `Message sent (id: ${msg.id}). ${partnerDisplay} will be invoked to respond.`,
@@ -901,66 +1190,63 @@ server.tool(
       return { content: [{ type: "text", text: "Error: Session not found" }] };
     }
 
-    const messages = readConv(session_id);
-    const sinceIdNum = since_id || 0;
-    const newMessages = messages.filter((m) => m.id > sinceIdNum);
+    const snapshot = buildSessionSnapshot(session_id, { sinceId: since_id || 0 });
 
-    // Check runner status
-    const status = readStat(session_id);
-    const hostAgent = getSessionHostAgent(status);
-    const partnerAgent = getSessionPartnerAgent(status);
-    const runnerAlive = status?.runner_pid
-      ? isProcessAlive(status.runner_pid)
-      : false;
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(snapshot.payload, null, 2),
+        },
+      ],
+    };
+  }
+);
 
-    const processingPath = getProcessingPath(sessionDir);
-    const partnerProcessing = fs.existsSync(processingPath);
+server.tool(
+  "wait_for_partner_response",
+  "Long-poll a dialog or review session until the configured partner replies, a terminal condition occurs, or the timeout expires. Defaults to a 10 minute wait and emits best-effort progress heartbeats when the MCP client supplies a progress token.",
+  {
+    session_id: z.string().describe("The session ID (dialog or review)"),
+    since_id: z
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe("Return messages with ID greater than this and wait for partner/system wake messages after this ID"),
+    timeout_ms: z
+      .number()
+      .int()
+      .min(MIN_WAIT_TIMEOUT_MS)
+      .max(MAX_WAIT_TIMEOUT_MS)
+      .optional()
+      .describe("Maximum wait time in milliseconds (default: 600000). The server clamps this to the session partner_timeout_ms minus 60000ms, with an absolute max of 3600000."),
+    include_system: z
+      .boolean()
+      .optional()
+      .describe("Wake on system messages as well as partner messages (default: true)"),
+  },
+  async ({ session_id, since_id, timeout_ms, include_system }, extra) => {
+    const sessionDir = resolveSessionDir(session_id);
+    if (!fs.existsSync(sessionDir)) {
+      return { content: [{ type: "text", text: "Error: Session not found" }] };
+    }
 
-    // Check for errors
-    const errorPath = path.join(sessionDir, "last_error.txt");
-    const lastError = fs.existsSync(errorPath)
-      ? fs.readFileSync(errorPath, "utf-8")
-      : null;
-
-    const budget = computeBudget(status, messages);
-    const reviewStatus = computeReviewStatus(status, messages, {
-      problem: readProblem(sessionDir),
-    });
-    const projectPath = status?.project_path || process.cwd();
-    const referencedFiles = extractReferencedFiles(
-      newMessages,
-      projectPath,
-      partnerAgent
+    const result = await waitForSessionChange(
+      session_id,
+      {
+        sinceId: since_id || 0,
+        timeoutMs: timeout_ms,
+        includeSystem: include_system !== false,
+      },
+      extra
     );
 
     return {
       content: [
         {
           type: "text",
-          text: JSON.stringify(
-            {
-              new_messages: newMessages,
-              total_messages: messages.length,
-              latest_id:
-                messages.length > 0 ? messages[messages.length - 1].id : 0,
-              host_agent: hostAgent,
-              partner_agent: partnerAgent,
-              partner_runner_alive: runnerAlive,
-              partner_currently_processing: partnerProcessing,
-              ...(partnerAgent === "codex"
-                ? {
-                    codex_runner_alive: runnerAlive,
-                    codex_currently_processing: partnerProcessing,
-                  }
-                : {}),
-              last_error: lastError,
-              budget,
-              review_status: reviewStatus,
-              referenced_files: referencedFiles,
-            },
-            null,
-            2
-          ),
+          text: JSON.stringify(result, null, 2),
         },
       ],
     };
@@ -1086,11 +1372,12 @@ server.tool(
           type: "text",
           text: JSON.stringify(
             {
-              session_type: status?.type || "unknown",
-              host_agent: getSessionHostAgent(status),
-              partner_agent: partnerAgent,
-              runner_alive: alive,
-              runner_pid: status?.runner_pid,
+      session_type: status?.type || "unknown",
+      host_agent: getSessionHostAgent(status),
+      partner_agent: partnerAgent,
+      partner_timeout_ms: normalizePartnerTimeout(status?.partner_timeout_ms),
+      runner_alive: alive,
+      runner_pid: status?.runner_pid,
               partner_currently_processing: processing,
               seconds_since_last_partner_message: secondsSinceLastPartner,
               ...(partnerAgent === "codex"
@@ -1186,12 +1473,13 @@ server.tool(
           : false;
         const budget = computeBudget(status, messages);
         results.push({
-          session_id: sessionId,
-          type: sessionId.startsWith("review-") ? "review" : "dialog",
-          started_at: status?.started_at,
-          host_agent: getSessionHostAgent(status),
-          partner_agent: getSessionPartnerAgent(status),
-          message_count: messages.length,
+        session_id: sessionId,
+        type: sessionId.startsWith("review-") ? "review" : "dialog",
+        started_at: status?.started_at,
+        host_agent: getSessionHostAgent(status),
+        partner_agent: getSessionPartnerAgent(status),
+        partner_timeout_ms: normalizePartnerTimeout(status?.partner_timeout_ms),
+        message_count: messages.length,
           runner_alive: alive,
           budget,
           ...(status?.branch ? { branch: status.branch, base_branch: status.base_branch } : {}),

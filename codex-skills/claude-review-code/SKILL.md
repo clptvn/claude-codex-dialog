@@ -16,6 +16,7 @@ Interpret the user's invocation text as:
 - `rounds:N`: optional soft round budget override
 - `effort:<level>`: optional Claude effort override. Valid levels are `low`, `medium`, `high`, `max`, and model-specific `xhigh`.
 - `model:<name>`: optional Claude model override. Valid models are `claude-sonnet-4-6`, `claude-opus-4-6[1m]`, and `claude-opus-4-7[1m]`.
+- `timeout:<minutes>` or `timeout:<minutes>m`: optional partner invocation timeout override, in minutes.
 
 If no diff target is provided, use `uncommitted`.
 
@@ -28,6 +29,8 @@ Model and effort rules:
 If `model:<name>` is provided and is not one of the valid models above, stop and report the accepted model values.
 If `effort:<level>` is provided and is not valid for the selected model, stop and report the accepted effort values for that model.
 If `effort:xhigh` is provided without `model:claude-opus-4-7[1m]`, stop and explain that `xhigh` is only valid with `claude-opus-4-7[1m]`.
+If `effort:max` is provided and no `timeout:*` override is provided, set `partner_timeout_ms: 1800000` so max-effort Opus runs have 30 minutes instead of the default 15.
+If `timeout:*` is provided, convert minutes to milliseconds and pass `partner_timeout_ms`. Accepted server range is 1 to 60 minutes.
 
 ## Start the review
 
@@ -43,6 +46,7 @@ Call `mcp__codex-dialog__start_code_review` with:
 - `max_rounds` only if the user explicitly provided `rounds:N`
 - `reasoning_effort` only if the user explicitly provided a valid `effort:<level>` for the selected model
 - `model` only if the user explicitly provided a valid `model:<name>`
+- `partner_timeout_ms` if the user explicitly provided `timeout:*`, or if `effort:max` was provided and no timeout override was provided
 
 Always prepend this adversarial framing to `review_focus`:
 
@@ -60,10 +64,13 @@ Claude generates the initial review automatically.
 
 Preferred wait strategy:
 
-1. If a shell tool is available, tail the session's `conversation.jsonl` until a partner message lands.
-2. Otherwise poll `mcp__codex-dialog__check_messages` every 5 seconds.
+1. Call `mcp__codex-dialog__wait_for_partner_response` with `session_id` and `since_id: 0`. If `partner_timeout_ms` was set, pass `timeout_ms: partner_timeout_ms - 60000`.
+2. If the wait tool is not exposed in the current session, fall back to tailing the session's `conversation.jsonl` until a partner message lands.
+3. If neither wait tool nor shell tail is available, poll `mcp__codex-dialog__check_messages` every 5 seconds.
 
-If there is no reply within a reasonable window:
+After every later `send_message`, call `mcp__codex-dialog__wait_for_partner_response` with `since_id` set to the returned `message_id`. If `partner_timeout_ms` was set, pass `timeout_ms: partner_timeout_ms - 60000`.
+
+If `wait_result` is `timeout_processing` or `timeout_idle`:
 
 1. Call `mcp__codex-dialog__check_partner_alive`
 2. If the runner died, stop and report the error honestly

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// PostToolUse hook for mcp__codex-dialog__check_messages
-// Parses the check_messages response, extracts validated referenced_files,
-// and writes them to a session-scoped marker file.
+// PostToolUse hook for codex-dialog response-reading tools. Parses responses,
+// extracts validated referenced_files, and writes them to a session-scoped
+// marker file.
 
 import fs from "fs";
 import path from "path";
@@ -48,7 +48,8 @@ try {
 // If the partner provided specific file references, always enforce them.
 // If no specific files but severity-tagged findings exist, use __any__ fallback.
 // If neither, nothing to enforce.
-// check_messages uses new_messages, get_full_history uses messages
+// check_messages and wait_for_partner_response use new_messages;
+// get_full_history uses messages.
 const msgs = response.new_messages || response.messages || [];
 const hasTaggedFindings = msgs.some(
   (m) =>

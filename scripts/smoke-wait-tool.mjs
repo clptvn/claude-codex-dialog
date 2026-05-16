@@ -1,0 +1,248 @@
+#!/usr/bin/env node
+
+import assert from "node:assert/strict";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+
+const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const serverPath = path.join(repoRoot, "src", "dialog-server.mjs");
+const dialogsDir = path.join(os.homedir(), ".claude", "dialogs");
+const createdDirs = [];
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function createSession(options = {}) {
+  fs.mkdirSync(dialogsDir, { recursive: true });
+  const sessionId = `dialog-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+  const sessionDir = path.join(dialogsDir, sessionId);
+  createdDirs.push(sessionDir);
+  fs.mkdirSync(sessionDir, { recursive: true });
+
+  const messages = options.messages || [];
+  fs.writeFileSync(
+    path.join(sessionDir, "conversation.jsonl"),
+    messages.map((m) => JSON.stringify(m)).join(messages.length ? "\n" : "") +
+      (messages.length ? "\n" : "")
+  );
+  fs.writeFileSync(path.join(sessionDir, "problem.md"), "wait tool smoke test");
+  fs.writeFileSync(
+    path.join(sessionDir, "status.json"),
+    JSON.stringify(
+      {
+        session_id: sessionId,
+        type: "dialog",
+        started_at: nowIso(),
+        project_path: repoRoot,
+        host_agent: "codex",
+        partner_agent: "claude",
+        partner_command: "claude",
+        max_rounds: 5,
+        hard_cap: 10,
+        reasoning_effort: null,
+        model: null,
+        partner_timeout_ms: options.partnerTimeoutMs ?? 15 * 60 * 1000,
+        tool_profile: "read",
+        subject_path: null,
+        subject_kind: null,
+        runner_pid: options.runnerPid ?? process.pid,
+      },
+      null,
+      2
+    )
+  );
+
+  if (options.processing) {
+    fs.writeFileSync(path.join(sessionDir, "partner_processing"), nowIso());
+  }
+  if (options.error) {
+    fs.writeFileSync(path.join(sessionDir, "last_error.txt"), options.error);
+  }
+
+  return { sessionId, sessionDir };
+}
+
+function appendMessage(sessionDir, message) {
+  fs.appendFileSync(
+    path.join(sessionDir, "conversation.jsonl"),
+    `${JSON.stringify(message)}\n`
+  );
+}
+
+function parseToolText(result) {
+  const text = result.content?.find((item) => item.type === "text")?.text;
+  assert.ok(text, "tool result did not include text content");
+  return JSON.parse(text);
+}
+
+async function callWait(client, args, options = {}) {
+  const result = await client.callTool(
+    {
+      name: "wait_for_partner_response",
+      arguments: args,
+    },
+    undefined,
+    {
+      timeout: options.timeout ?? 10000,
+      onprogress: options.onprogress,
+    }
+  );
+  return parseToolText(result);
+}
+
+async function main() {
+  const client = new Client({
+    name: "wait-tool-smoke",
+    version: "1.0.0",
+  });
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [serverPath],
+    cwd: repoRoot,
+    stderr: "pipe",
+  });
+  transport.stderr?.on("data", (chunk) => {
+    process.stderr.write(chunk);
+  });
+
+  try {
+    await client.connect(transport);
+
+    {
+      const result = await client.callTool(
+        {
+          name: "start_dialog",
+          arguments: {
+            problem_description: "partner timeout smoke",
+            project_path: repoRoot,
+            host_agent: "codex",
+            partner_agent: "claude",
+            partner_timeout_ms: 30 * 60 * 1000,
+          },
+        },
+        undefined,
+        { timeout: 10000 }
+      );
+      const payload = parseToolText(result);
+      assert.equal(payload.partner_timeout_ms, 30 * 60 * 1000);
+      if (payload.dialog_dir) createdDirs.push(payload.dialog_dir);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const runnerLog = fs.readFileSync(
+        path.join(payload.dialog_dir, "runner.log"),
+        "utf-8"
+      );
+      assert.match(runnerLog, /Partner timeout: 1800s/);
+      await client.callTool(
+        {
+          name: "end_dialog",
+          arguments: { session_id: payload.session_id },
+        },
+        undefined,
+        { timeout: 10000 }
+      );
+    }
+
+    {
+      const { sessionId } = createSession({
+        messages: [
+          {
+            id: 1,
+            from: "claude",
+            content: "ready",
+            timestamp: nowIso(),
+          },
+        ],
+      });
+      const result = await callWait(client, {
+        session_id: sessionId,
+        since_id: 0,
+        timeout_ms: 5000,
+      });
+      assert.equal(result.wait_result, "message");
+      assert.equal(result.partner_timeout_ms, 15 * 60 * 1000);
+      assert.equal(result.next_since_id, 1);
+      assert.equal(result.new_messages.length, 1);
+    }
+
+    {
+      const { sessionId, sessionDir } = createSession();
+      const pending = callWait(client, {
+        session_id: sessionId,
+        since_id: 0,
+        timeout_ms: 5000,
+      });
+      setTimeout(() => {
+        appendMessage(sessionDir, {
+          id: 1,
+          from: "claude",
+          content: "delayed",
+          timestamp: nowIso(),
+        });
+      }, 250);
+      const result = await pending;
+      assert.equal(result.wait_result, "message");
+      assert.equal(result.next_since_id, 1);
+    }
+
+    {
+      const { sessionId } = createSession();
+      const result = await callWait(client, {
+        session_id: sessionId,
+        since_id: 0,
+        timeout_ms: 1000,
+      });
+      assert.equal(result.wait_result, "timeout_idle");
+      assert.equal(result.timed_out, true);
+    }
+
+    {
+      const { sessionId } = createSession({ processing: true });
+      const result = await callWait(client, {
+        session_id: sessionId,
+        since_id: 0,
+        timeout_ms: 1000,
+      });
+      assert.equal(result.wait_result, "timeout_processing");
+      assert.equal(result.timed_out, true);
+    }
+
+    {
+      const { sessionId } = createSession({ error: "boom" });
+      const result = await callWait(client, {
+        session_id: sessionId,
+        since_id: 0,
+        timeout_ms: 5000,
+      });
+      assert.equal(result.wait_result, "error");
+      assert.match(result.last_error, /boom/);
+    }
+
+    {
+      const { sessionId } = createSession({ runnerPid: 999999999 });
+      const result = await callWait(client, {
+        session_id: sessionId,
+        since_id: 0,
+        timeout_ms: 5000,
+      });
+      assert.equal(result.wait_result, "runner_exited");
+    }
+
+    console.log("wait_for_partner_response smoke checks passed");
+  } finally {
+    await transport.close().catch(() => {});
+    for (const dir of createdDirs) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

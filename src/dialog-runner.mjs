@@ -29,6 +29,9 @@ const PARTNER_MODEL = process.argv[7] || null;
 const HOST_AGENT = normalizeAgent(process.argv[8], "claude");
 const PARTNER_AGENT = normalizeAgent(process.argv[9], "codex");
 const TOOL_PROFILE = process.argv[10] === "implementation" ? "implementation" : "read";
+const DEFAULT_PARTNER_TIMEOUT_MS = 15 * 60 * 1000;
+const PARTNER_TIMEOUT_MS =
+  Math.max(1000, parseInt(process.argv[11], 10)) || DEFAULT_PARTNER_TIMEOUT_MS;
 
 if (!sessionDir || HOST_AGENT === PARTNER_AGENT) {
   process.exit(1);
@@ -45,7 +48,6 @@ const LOG_PATH = path.join(sessionDir, "runner.log");
 
 const MAX_TURNS = HARD_CAP;
 const POLL_INTERVAL_MS = 3000;
-const PARTNER_TIMEOUT_MS = 15 * 60 * 1000;
 const MAX_IDLE_MS = 15 * 60 * 1000;
 const MAX_CONVERSATION_MESSAGES = 30;
 
@@ -233,6 +235,7 @@ async function main() {
   log(`Partner agent: ${PARTNER_DISPLAY}`);
   log(`Partner command: ${partnerCommand}`);
   log(`Soft cap: ${SOFT_CAP} rounds, hard cap: ${HARD_CAP} rounds`);
+  log(`Partner timeout: ${PARTNER_TIMEOUT_MS / 1000}s`);
   log(`Model: ${PARTNER_MODEL || "default"}`);
   log(`Reasoning effort: ${REASONING_EFFORT || "partner default"}`);
   log(`Tool profile: ${TOOL_PROFILE}`);

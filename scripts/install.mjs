@@ -304,6 +304,7 @@ function installClaudeCommandsAndHooks(logStep) {
 
   for (const matcher of [
     "mcp__codex-dialog__check_messages",
+    "mcp__codex-dialog__wait_for_partner_response",
     "mcp__codex-dialog__get_full_history",
   ]) {
     const entry = {

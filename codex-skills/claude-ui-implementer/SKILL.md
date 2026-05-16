@@ -20,6 +20,7 @@ Interpret the invocation text as the feature request plus optional controls:
 - `rounds:N`: optional soft round budget override
 - `model:<name>`: optional Claude model override
 - `effort:<level>`: optional Claude effort override
+- `timeout:<minutes>` or `timeout:<minutes>m`: optional partner invocation timeout override, in minutes
 
 Defaults for this skill:
 
@@ -28,6 +29,7 @@ Defaults for this skill:
 - `tool_profile`: `implementation`
 
 Only override the default model or effort if the user explicitly provided `model:*` or `effort:*`.
+Pass `partner_timeout_ms` only if the user explicitly provided `timeout:*`, or use `1800000` if the user explicitly provided `effort:max` without a timeout override.
 
 ## Split the work
 
@@ -59,6 +61,7 @@ Call `mcp__codex-dialog__start_dialog` with:
 - `reasoning_effort: "xhigh"` unless overridden
 - `tool_profile: "implementation"`
 - `max_rounds` only if the user provided `rounds:N`
+- `partner_timeout_ms` if selected during invocation parsing
 - `problem_description`: `Frontend implementation collaboration for: <short feature summary>. Claude owns UI/frontend implementation; Codex owns backend/API/data/integration and final verification.`
 
 Save the returned `session_id`.
@@ -110,15 +113,13 @@ Shared boundary:
 
 After sending the first message, immediately work on the Codex-owned backend/API/data/test side. Avoid editing the frontend files assigned to Claude while Claude is running.
 
-Prefer waiting on the session file instead of repeated polling when practical:
+Prefer the MCP wait tool instead of repeated polling:
 
-```bash
-tail -F -n 0 "$HOME/.claude/dialogs/<SESSION_ID>/conversation.jsonl" 2>/dev/null | grep -m 1 --line-buffered -E '"from":"(claude|system)"'
-```
+1. Call `mcp__codex-dialog__wait_for_partner_response` with `session_id` and `since_id` set to the latest message you sent. If `partner_timeout_ms` was set, pass `timeout_ms: partner_timeout_ms - 60000`.
+2. If the wait tool is not exposed in the current session, fall back to waiting on the session file with a shell tail.
+3. If neither wait tool nor shell tail is available, poll `mcp__codex-dialog__check_messages` every 5 seconds.
 
-Then call `mcp__codex-dialog__check_messages` to read Claude's response.
-
-If Claude does not answer:
+If `wait_result` is `timeout_processing` or `timeout_idle`:
 
 1. Call `mcp__codex-dialog__check_partner_alive`.
 2. If the runner died, inspect `last_error` and report it honestly.
