@@ -15,7 +15,7 @@ Interpret the user's invocation text as:
 - `review_focus`: any remaining free text after stripping control tokens
 - `rounds:N`: optional soft round budget override
 - `effort:<level>`: optional Claude effort override. Valid levels are `low`, `medium`, `high`, `max`, and model-specific `xhigh`.
-- `model:<name>`: optional Claude model override. Valid models are `claude-sonnet-4-6`, `claude-opus-4-6[1m]`, and `claude-opus-4-7[1m]`.
+- `model:<name>`: optional Claude model override. Valid models are `claude-sonnet-4-6`, `claude-opus-4-6[1m]`, `claude-opus-4-7[1m]`, `claude-opus-4-8`, and `claude-opus-4-8[1m]`.
 - `timeout:<minutes>` or `timeout:<minutes>m`: optional partner invocation timeout override, in minutes.
 
 If no diff target is provided, use `uncommitted`.
@@ -25,10 +25,12 @@ Model and effort rules:
 - `claude-sonnet-4-6`: accepts `low`, `medium`, `high`, `max`
 - `claude-opus-4-6[1m]`: accepts `low`, `medium`, `high`, `max`
 - `claude-opus-4-7[1m]`: accepts `low`, `medium`, `high`, `xhigh`, `max`
+- `claude-opus-4-8`: accepts `low`, `medium`, `high`, `max`
+- `claude-opus-4-8[1m]`: accepts `low`, `medium`, `high`, `xhigh`, `max`
 
 If `model:<name>` is provided and is not one of the valid models above, stop and report the accepted model values.
 If `effort:<level>` is provided and is not valid for the selected model, stop and report the accepted effort values for that model.
-If `effort:xhigh` is provided without `model:claude-opus-4-7[1m]`, stop and explain that `xhigh` is only valid with `claude-opus-4-7[1m]`.
+If `effort:xhigh` is provided without `model:claude-opus-4-7[1m]` or `model:claude-opus-4-8[1m]`, stop and explain that `xhigh` is only valid with `claude-opus-4-7[1m]` or `claude-opus-4-8[1m]`.
 If `effort:max` is provided and no `timeout:*` override is provided, set `partner_timeout_ms: 1800000` so max-effort Opus runs have 30 minutes instead of the default 15.
 If `timeout:*` is provided, convert minutes to milliseconds and pass `partner_timeout_ms`. Accepted server range is 1 to 60 minutes.
 

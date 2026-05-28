@@ -204,7 +204,7 @@ To invert the flow, set:
 Both `start_dialog` and `start_code_review` also accept:
 
 - `partner_command`
-- `model`
+- `model`: forwarded to the selected partner CLI. Claude examples: `claude-opus-4-8`, `claude-opus-4-8[1m]`, `claude-opus-4-7[1m]`, `claude-opus-4-6[1m]`, `claude-sonnet-4-6`.
 - `reasoning_effort`
 - `max_rounds`
 - `partner_timeout_ms`: maximum time for each partner CLI invocation. Defaults to `900000` (15 minutes) and accepts up to `3600000` (60 minutes). Use `1800000` for 30 minute max-effort Claude runs.

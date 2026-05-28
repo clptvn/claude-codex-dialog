@@ -33,6 +33,10 @@ const MAX_WAIT_TIMEOUT_MS = MAX_PARTNER_TIMEOUT_MS;
 const MIN_WAIT_TIMEOUT_MS = 1000;
 const WAIT_FALLBACK_INTERVAL_MS = 5000;
 const WAIT_PROGRESS_INTERVAL_MS = 30000;
+const MODEL_OVERRIDE_DESCRIPTION =
+  "Optional partner model override. Model strings are forwarded to the selected partner CLI. Claude examples: claude-opus-4-8, claude-opus-4-8[1m], claude-opus-4-7[1m], claude-opus-4-6[1m], claude-sonnet-4-6. Codex examples: gpt-5.5, gpt-5.4, gpt-5.3-codex.";
+const REASONING_EFFORT_DESCRIPTION =
+  "Optional partner-specific reasoning effort level. For Codex this is typically low|medium|high|xhigh; for Claude low|medium|high|xhigh|max.";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -476,13 +480,11 @@ server.tool(
     reasoning_effort: z
       .string()
       .optional()
-      .describe(
-        "Optional partner-specific reasoning effort level. For Codex this is typically low|medium|high|xhigh; for Claude low|medium|high|xhigh|max."
-      ),
+      .describe(REASONING_EFFORT_DESCRIPTION),
     model: z
       .string()
       .optional()
-      .describe("Optional partner model override. Omit to use the partner CLI default."),
+      .describe(MODEL_OVERRIDE_DESCRIPTION),
     partner_timeout_ms: z
       .number()
       .int()
@@ -723,13 +725,11 @@ server.tool(
     reasoning_effort: z
       .string()
       .optional()
-      .describe(
-        "Optional partner-specific reasoning effort override."
-      ),
+      .describe(REASONING_EFFORT_DESCRIPTION),
     model: z
       .string()
       .optional()
-      .describe("Optional partner model override."),
+      .describe(MODEL_OVERRIDE_DESCRIPTION),
     partner_timeout_ms: z
       .number()
       .int()
